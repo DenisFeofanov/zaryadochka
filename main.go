@@ -43,6 +43,12 @@ func initDB() (*sql.DB, error) {
 			chat_id INTEGER,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
+		CREATE TABLE IF NOT EXISTS daily_completions (
+			user_id INTEGER,
+			completed_at DATE,
+			PRIMARY KEY (user_id, completed_at),
+			FOREIGN KEY (user_id) REFERENCES participants(user_id)
+		);
 	`)
 	return db, err
 }
@@ -61,7 +67,7 @@ func (b *Bot) handleStart(message *tgbotapi.Message) error {
 	}
 
 	if exists {
-		return b.sendParticipantsList(message.Chat.ID)
+		return b.sendParticipantsList(message.Chat.ID, message.From.ID)
 	}
 
 	// ... existing keyboard and message code ...
@@ -77,24 +83,39 @@ func (b *Bot) handleStart(message *tgbotapi.Message) error {
 	return err
 }
 
-func (b *Bot) getParticipantsList() ([]string, error) {
+func (b *Bot) getParticipantsList() ([]struct {
+	Name      string
+	Completed bool
+}, error) {
+	today := time.Now().Format("2006-01-02")
 	rows, err := b.db.Query(`
-		SELECT COALESCE(display_name, username) as name 
-		FROM participants
-		ORDER BY joined_at DESC
-	`)
+		SELECT 
+			COALESCE(p.display_name, p.username) as name,
+			CASE WHEN dc.completed_at IS NOT NULL THEN 1 ELSE 0 END as completed
+		FROM participants p
+		LEFT JOIN daily_completions dc 
+			ON p.user_id = dc.user_id 
+			AND dc.completed_at = ?
+		ORDER BY p.joined_at DESC
+	`, today)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var participants []string
+	var participants []struct {
+		Name      string
+		Completed bool
+	}
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var p struct {
+			Name      string
+			Completed bool
+		}
+		if err := rows.Scan(&p.Name, &p.Completed); err != nil {
 			return nil, err
 		}
-		participants = append(participants, name)
+		participants = append(participants, p)
 	}
 	return participants, nil
 }
@@ -138,10 +159,10 @@ func (b *Bot) handleNameResponse(message *tgbotapi.Message) error {
 		return err
 	}
 
-	return b.sendParticipantsList(chatID)
+	return b.sendParticipantsList(chatID, userID)
 }
 
-func (b *Bot) sendParticipantsList(chatID int64) error {
+func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	participants, err := b.getParticipantsList()
 	if err != nil {
 		return err
@@ -150,14 +171,39 @@ func (b *Bot) sendParticipantsList(chatID int64) error {
 	currentDate := time.Now().Format("02.01.2006")
 	response := fmt.Sprintf("%s\nУчастники:\n\n", currentDate)
 
-	for _, participant := range participants {
-		response += fmt.Sprintf("• %s\n", participant)
+	for _, p := range participants {
+		status := "ещё нет"
+		if p.Completed {
+			status = "ДА"
+		}
+		response += fmt.Sprintf("- %s %s\n", p.Name, status)
+	}
+
+	// Check if user completed today
+	today := time.Now().Format("2006-01-02")
+	var completed bool
+	err = b.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM daily_completions 
+			WHERE user_id = ? AND completed_at = ?
+		)
+	`, userID, today).Scan(&completed)
+	if err != nil {
+		return err
+	}
+
+	var actionButton tgbotapi.InlineKeyboardButton
+	if completed {
+		actionButton = tgbotapi.NewInlineKeyboardButtonData("Отменить зарядочку", "undo_complete")
+	} else {
+		actionButton = tgbotapi.NewInlineKeyboardButtonData("Сделать зарядочку", "complete_challenge")
 	}
 
 	msg := tgbotapi.NewMessage(chatID, response)
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Обновить", "update_list"),
+			actionButton,
 		),
 	)
 	_, err = b.api.Send(msg)
@@ -165,12 +211,89 @@ func (b *Bot) sendParticipantsList(chatID int64) error {
 }
 
 func (b *Bot) handleUpdateList(query *tgbotapi.CallbackQuery) error {
-	callback := tgbotapi.NewCallback(query.ID, "Список обновлен")
+	// Add callback acknowledgment
+	callback := tgbotapi.NewCallback(query.ID, "")
 	if _, err := b.api.Request(callback); err != nil {
 		return err
 	}
 
-	return b.sendParticipantsList(query.Message.Chat.ID)
+	return b.sendParticipantsList(query.Message.Chat.ID, query.From.ID)
+}
+
+func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
+	today := time.Now().Format("2006-01-02")
+
+	// Check if already completed today
+	var completed bool
+	err := b.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM daily_completions 
+			WHERE user_id = ? AND completed_at = ?
+		)
+	`, query.From.ID, today).Scan(&completed)
+	if err != nil {
+		return err
+	}
+
+	if completed {
+		callback := tgbotapi.NewCallback(query.ID, "Ты уже отметился, не суетись :)")
+		_, err := b.api.Request(callback)
+		return err
+	}
+
+	// Mark as completed
+	_, err = b.db.Exec(`
+		INSERT INTO daily_completions (user_id, completed_at)
+		VALUES (?, ?)
+	`, query.From.ID, today)
+	if err != nil {
+		return err
+	}
+
+	callback := tgbotapi.NewCallback(query.ID, "Отлично! Так держать! 💪")
+	if _, err := b.api.Request(callback); err != nil {
+		return err
+	}
+
+	return b.sendParticipantsList(query.Message.Chat.ID, query.From.ID)
+}
+
+func (b *Bot) handleUndoComplete(query *tgbotapi.CallbackQuery) error {
+	today := time.Now().Format("2006-01-02")
+
+	// Check if completed today
+	var completed bool
+	err := b.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM daily_completions 
+			WHERE user_id = ? AND completed_at = ?
+		)
+	`, query.From.ID, today).Scan(&completed)
+	if err != nil {
+		return err
+	}
+
+	if !completed {
+		callback := tgbotapi.NewCallback(query.ID, "У вас нет отметки о выполнении за сегодня")
+		_, err := b.api.Request(callback)
+		return err
+	}
+
+	// Remove completion
+	_, err = b.db.Exec(`
+		DELETE FROM daily_completions 
+		WHERE user_id = ? AND completed_at = ?
+	`, query.From.ID, today)
+	if err != nil {
+		return err
+	}
+
+	callback := tgbotapi.NewCallback(query.ID, "Отметка о выполнении отменена")
+	if _, err := b.api.Request(callback); err != nil {
+		return err
+	}
+
+	return b.sendParticipantsList(query.Message.Chat.ID, query.From.ID)
 }
 
 func main() {
@@ -224,6 +347,10 @@ func main() {
 				err = bot.handleJoinChallenge(update.CallbackQuery)
 			case "update_list":
 				err = bot.handleUpdateList(update.CallbackQuery)
+			case "complete_challenge":
+				err = bot.handleCompleteChallenge(update.CallbackQuery)
+			case "undo_complete":
+				err = bot.handleUndoComplete(update.CallbackQuery)
 			}
 		}
 
