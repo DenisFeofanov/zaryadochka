@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -61,6 +62,7 @@ var messages = map[string]string{
 	"already_completed":    "Ты уже отметился, не суетись :)",
 	"no_completion_today":  "У вас нет отметки о выполнении за сегодня",
 	"completion_cancelled": "Отметка о выполнении отменена",
+	"reminder":             "Не забудь сделать зарядочку сегодня! 💪",
 }
 
 var congratsMessages = []string{
@@ -365,6 +367,38 @@ func (b *Bot) handleUndoComplete(query *tgbotapi.CallbackQuery) error {
 	return b.sendParticipantsList(query.Message.Chat.ID, query.From.ID)
 }
 
+func (b *Bot) sendDailyReminders() error {
+	today := time.Now().Format("2006-01-02")
+
+	// Get all participants who haven't completed today's challenge
+	rows, err := b.db.Query(`
+		SELECT p.user_id, p.chat_id 
+		FROM participants p
+		LEFT JOIN daily_completions dc 
+			ON p.user_id = dc.user_id 
+			AND dc.completed_at = ?
+		WHERE dc.user_id IS NULL
+	`, today)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var userID, chatID int64
+		if err := rows.Scan(&userID, &chatID); err != nil {
+			log.Printf("Error scanning user: %v", err)
+			continue
+		}
+
+		msg := tgbotapi.NewMessage(chatID, messages["reminder"])
+		if _, err := b.api.Send(msg); err != nil {
+			log.Printf("Error sending reminder to user %d: %v", userID, err)
+		}
+	}
+	return nil
+}
+
 func main() {
 	// Load env variables
 	err := godotenv.Load()
@@ -392,6 +426,25 @@ func main() {
 	updates := botAPI.GetUpdatesChan(u)
 
 	rand.Seed(time.Now().UnixNano())
+
+	// Add ticker for daily reminders
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			now := time.Now()
+			next := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
+			if now.After(next) {
+				next = next.Add(24 * time.Hour)
+			}
+			timer := time.NewTimer(next.Sub(now))
+			<-timer.C
+			if err := bot.sendDailyReminders(); err != nil {
+				log.Printf("Error sending daily reminders: %v", err)
+			}
+		}
+	}()
 
 	for update := range updates {
 		var err error
@@ -429,4 +482,7 @@ func main() {
 			log.Printf("Error handling update: %v", err)
 		}
 	}
+
+	// Wait for goroutine to finish (though it never will in practice)
+	wg.Wait()
 }
