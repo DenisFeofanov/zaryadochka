@@ -2,9 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
-	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
@@ -34,13 +35,36 @@ func initDB() (*sql.DB, error) {
 			user_id INTEGER PRIMARY KEY,
 			username TEXT,
 			chat_id INTEGER,
+			display_name TEXT,
 			joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)
+		);
+		CREATE TABLE IF NOT EXISTS pending_joins (
+			user_id INTEGER PRIMARY KEY,
+			chat_id INTEGER,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
 	`)
 	return db, err
 }
 
 func (b *Bot) handleStart(message *tgbotapi.Message) error {
+	// Check if user is already a participant
+	var exists bool
+	err := b.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM participants 
+			WHERE user_id = ?
+		)
+	`, message.From.ID).Scan(&exists)
+	if err != nil {
+		return err
+	}
+
+	if exists {
+		return b.sendParticipantsList(message.Chat.ID)
+	}
+
+	// ... existing keyboard and message code ...
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Хочу 💪", "join_challenge"),
@@ -49,13 +73,14 @@ func (b *Bot) handleStart(message *tgbotapi.Message) error {
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, "Ребята ежедневно кайфуют от зарядочки. Тоже хочешь?")
 	msg.ReplyMarkup = keyboard
-	_, err := b.api.Send(msg)
+	_, err = b.api.Send(msg)
 	return err
 }
 
 func (b *Bot) getParticipantsList() ([]string, error) {
 	rows, err := b.db.Query(`
-		SELECT username FROM participants
+		SELECT COALESCE(display_name, username) as name 
+		FROM participants
 		ORDER BY joined_at DESC
 	`)
 	if err != nil {
@@ -65,43 +90,87 @@ func (b *Bot) getParticipantsList() ([]string, error) {
 
 	var participants []string
 	for rows.Next() {
-		var username string
-		if err := rows.Scan(&username); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		participants = append(participants, "@"+username)
+		participants = append(participants, name)
 	}
 	return participants, nil
 }
 
 func (b *Bot) handleJoinChallenge(query *tgbotapi.CallbackQuery) error {
-	userID := query.From.ID
-	username := query.From.UserName
-	chatID := query.Message.Chat.ID
+	// First, ask for the name
+	callback := tgbotapi.NewCallback(query.ID, "Как вас записать в список?")
+	if _, err := b.api.Request(callback); err != nil {
+		return err
+	}
 
+	msg := tgbotapi.NewMessage(query.Message.Chat.ID, "Пожалуйста, введите ваше имя:")
+	msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
+	_, err := b.api.Send(msg)
+
+	// Store temporary state in DB to handle the name response
+	_, err = b.db.Exec(`
+		INSERT OR REPLACE INTO pending_joins (user_id, chat_id)
+		VALUES (?, ?)
+	`, query.From.ID, query.Message.Chat.ID)
+	return err
+}
+
+func (b *Bot) handleNameResponse(message *tgbotapi.Message) error {
+	userID := message.From.ID
+	chatID := message.Chat.ID
+	displayName := message.Text
+
+	// Insert participant with custom name
 	_, err := b.db.Exec(`
-		INSERT OR IGNORE INTO participants (user_id, username, chat_id)
-		VALUES (?, ?, ?)
-	`, userID, username, chatID)
+		INSERT OR REPLACE INTO participants (user_id, username, chat_id, display_name)
+		VALUES (?, ?, ?, ?)
+	`, userID, message.From.UserName, chatID, displayName)
 	if err != nil {
 		return err
 	}
 
+	// Remove from pending joins
+	_, err = b.db.Exec(`DELETE FROM pending_joins WHERE user_id = ?`, userID)
+	if err != nil {
+		return err
+	}
+
+	return b.sendParticipantsList(chatID)
+}
+
+func (b *Bot) sendParticipantsList(chatID int64) error {
 	participants, err := b.getParticipantsList()
 	if err != nil {
 		return err
 	}
 
-	response := "Добро пожаловать в зарядочку!\n\nУчастники:\n" + strings.Join(participants, "\n")
+	currentDate := time.Now().Format("02.01.2006")
+	response := fmt.Sprintf("%s\nУчастники:\n\n", currentDate)
 
-	callback := tgbotapi.NewCallback(query.ID, response)
+	for _, participant := range participants {
+		response += fmt.Sprintf("• %s\n", participant)
+	}
+
+	msg := tgbotapi.NewMessage(chatID, response)
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Обновить", "update_list"),
+		),
+	)
+	_, err = b.api.Send(msg)
+	return err
+}
+
+func (b *Bot) handleUpdateList(query *tgbotapi.CallbackQuery) error {
+	callback := tgbotapi.NewCallback(query.ID, "Список обновлен")
 	if _, err := b.api.Request(callback); err != nil {
 		return err
 	}
 
-	msg := tgbotapi.NewMessage(chatID, response)
-	_, err = b.api.Send(msg)
-	return err
+	return b.sendParticipantsList(query.Message.Chat.ID)
 }
 
 func main() {
@@ -132,10 +201,30 @@ func main() {
 
 	for update := range updates {
 		var err error
-		if update.Message != nil && update.Message.Text == "/start" {
-			err = bot.handleStart(update.Message)
-		} else if update.CallbackQuery != nil && update.CallbackQuery.Data == "join_challenge" {
-			err = bot.handleJoinChallenge(update.CallbackQuery)
+		if update.Message != nil {
+			if update.Message.Text == "/start" {
+				err = bot.handleStart(update.Message)
+			} else if update.Message.ReplyToMessage != nil {
+				// Check if user is in pending_joins
+				var exists bool
+				err = bot.db.QueryRow(`
+					SELECT EXISTS(
+						SELECT 1 FROM pending_joins 
+						WHERE user_id = ? AND chat_id = ?
+					)
+				`, update.Message.From.ID, update.Message.Chat.ID).Scan(&exists)
+
+				if err == nil && exists {
+					err = bot.handleNameResponse(update.Message)
+				}
+			}
+		} else if update.CallbackQuery != nil {
+			switch update.CallbackQuery.Data {
+			case "join_challenge":
+				err = bot.handleJoinChallenge(update.CallbackQuery)
+			case "update_list":
+				err = bot.handleUpdateList(update.CallbackQuery)
+			}
 		}
 
 		if err != nil {
