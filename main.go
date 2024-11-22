@@ -27,7 +27,7 @@ func NewBot(api *tgbotapi.BotAPI, db *sql.DB) *Bot {
 }
 
 func initDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", "./database.db")
+	db, err := sql.Open("sqlite3", "./data/database.db")
 	if err != nil {
 		return nil, err
 	}

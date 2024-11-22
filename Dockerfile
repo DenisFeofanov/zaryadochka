@@ -1,12 +1,39 @@
-FROM golang:1.23.3
+# Use official golang image as builder
+FROM golang:1.21-alpine AS builder
 
-WORKDIR /usr/src/app
+# Set working directory
+WORKDIR /app
 
-# pre-copy/cache go.mod for pre-downloading dependencies and only redownloading them in subsequent builds if they change
+# Install sqlite and gcc
+RUN apk add --no-cache gcc musl-dev sqlite-dev
+
+# Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download && go mod verify
 
+# Download dependencies
+RUN go mod download
+
+# Copy source code
 COPY . .
-RUN go build -v -o /usr/local/bin/app ./...
 
-CMD ["app"]
+# Build the application
+RUN CGO_ENABLED=1 GOOS=linux go build -o main .
+
+# Use alpine for smaller final image
+FROM alpine:latest
+
+# Install sqlite
+RUN apk add --no-cache sqlite-libs
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /app/main .
+# Copy .env file
+COPY .env .
+
+# Create volume for database
+VOLUME ["/app/data"]
+
+# Run the binary
+CMD ["./main"]
