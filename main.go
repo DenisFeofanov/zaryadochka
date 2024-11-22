@@ -85,7 +85,6 @@ var congratsMessages = []string{
 	"Спортивные боги аплодируют стоя! 👏",
 	"Так-так-так, кто тут у нас такой молодец? 🤔",
 	"Мотивация на максималках! 📈",
-	"Вот это дисциплина! Военные завидуют! 🪖",
 	"Качаем не только тело, но и силу воли! 🧠",
 	"Теперь можно и селфи в спортзале! 🤳",
 	"Твой организм говорит 'СПАСИБО'! ❤️",
@@ -268,6 +267,18 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 		actionButton = tgbotapi.NewInlineKeyboardButtonData("Сделать зарядочку", "complete_challenge")
 	}
 
+	// Add streak information to the response
+	streak, err := b.getConsecutiveCompletionDays()
+	if err != nil {
+		return err
+	}
+
+	if streak > 0 {
+		response += fmt.Sprintf("\n🔥 Общий стрик: %d %s\n",
+			streak,
+			getDayWord(streak))
+	}
+
 	msg := tgbotapi.NewMessage(chatID, response)
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -397,6 +408,84 @@ func (b *Bot) sendDailyReminders() error {
 		}
 	}
 	return nil
+}
+
+func (b *Bot) getConsecutiveCompletionDays() (int, error) {
+	// Get all participants
+	rows, err := b.db.Query(`SELECT user_id FROM participants`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var participantIDs []int64
+	for rows.Next() {
+		var userID int64
+		if err := rows.Scan(&userID); err != nil {
+			return 0, err
+		}
+		participantIDs = append(participantIDs, userID)
+	}
+
+	if len(participantIDs) == 0 {
+		return 0, nil
+	}
+
+	// Start from today and go backwards
+	currentDate := time.Now()
+	consecutiveDays := 0
+
+	for {
+		dateStr := currentDate.Format("2006-01-02")
+
+		// Check if all participants completed on this date
+		var completedCount int
+		err := b.db.QueryRow(`
+			SELECT COUNT(DISTINCT user_id) 
+			FROM daily_completions 
+			WHERE completed_at = ? AND user_id IN (
+				SELECT user_id FROM participants
+				WHERE joined_at <= ?
+			)
+		`, dateStr, dateStr).Scan(&completedCount)
+
+		if err != nil {
+			return 0, err
+		}
+
+		// Get total participants who were members on that date
+		var totalParticipants int
+		err = b.db.QueryRow(`
+			SELECT COUNT(*) 
+			FROM participants 
+			WHERE joined_at <= ?
+		`, dateStr).Scan(&totalParticipants)
+
+		if err != nil {
+			return 0, err
+		}
+
+		// Break if not all participants completed or if we reach a date with no participants
+		if completedCount != totalParticipants || totalParticipants == 0 {
+			break
+		}
+
+		consecutiveDays++
+		currentDate = currentDate.AddDate(0, 0, -1)
+	}
+
+	return consecutiveDays, nil
+}
+
+// Helper function to get the correct form of "день/дня/дней"
+func getDayWord(days int) string {
+	if days%10 == 1 && days%100 != 11 {
+		return "день"
+	}
+	if days%10 >= 2 && days%10 <= 4 && (days%100 < 10 || days%100 >= 20) {
+		return "дня"
+	}
+	return "дней"
 }
 
 func main() {
