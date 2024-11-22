@@ -1,0 +1,19 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build for Alpine",
+      "type": "shell",
+      "command": "CGO_ENABLED=1 GOOS=linux CGO_LDFLAGS=\"-static\" go build -a -tags sqlite_omit_load_extension -o main",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": ["$go"]
+    }
+  ]
+}
