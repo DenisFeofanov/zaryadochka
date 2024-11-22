@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"time"
 
@@ -46,11 +47,64 @@ func initDB() (*sql.DB, error) {
 		CREATE TABLE IF NOT EXISTS daily_completions (
 			user_id INTEGER,
 			completed_at DATE,
+			congrats_message TEXT,
 			PRIMARY KEY (user_id, completed_at),
 			FOREIGN KEY (user_id) REFERENCES participants(user_id)
 		);
 	`)
 	return db, err
+}
+
+var messages = map[string]string{
+	"want_to_join":         "Ребята ежедневно кайфуют от зарядочки. Тоже хочешь?",
+	"enter_name":           "Как к тебе обращаться?",
+	"already_completed":    "Ты уже отметился, не суетись :)",
+	"no_completion_today":  "У вас нет отметки о выполнении за сегодня",
+	"completion_cancelled": "Отметка о выполнении отменена",
+}
+
+var congratsMessages = []string{
+	"Красава! 💪 Теперь можно и пельмешей навернуть",
+	"Ого-го! Качаем мышцы, качаем жизнь! 🏋️‍♂️",
+	"Вот это по-нашему! Теперь ты официально круче всех лежебок 😎",
+	"Зарядка сделана, а значит день уже победный! 🏆",
+	"Так держать, спортсмен! Олимпиада уже трепещет 🥇",
+	"Ещё одна тренировка - и ты почти Дуэйн Джонсон! 💪😎",
+	"Вау! Да ты просто машина! 🚀",
+	"Спортивная братва уже гордится тобой! 🤜🤛",
+	"Мышцы подкачаны, характер закален! 💪😤",
+	"Теперь можно и пончик съесть, ты заслужил! 🍩",
+	"Чак Норрис нервно курит в сторонке! 🥋",
+	"Халк бы одобрил такую зарядку! 💚",
+	"Теперь ты официально в клубе утренних чемпионов! 🌅",
+	"Мастер спорта по утренней зарядке! 🎖",
+	"Твои мышцы уже шепчут 'спасибо'! 🗣️",
+	"Ещё немного, и придется расширять дверные проемы! 💪",
+	"Спортивные боги аплодируют стоя! 👏",
+	"Так-так-так, кто тут у нас такой молодец? 🤔",
+	"Мотивация на максималках! 📈",
+	"Вот это дисциплина! Военные завидуют! 🪖",
+	"Качаем не только тело, но и силу воли! 🧠",
+	"Теперь можно и селфи в спортзале! 🤳",
+	"Твой организм говорит 'СПАСИБО'! ❤️",
+	"Вот это настрой! Вот это характер! 🔥",
+	"Ты просто космос! 🚀",
+	"Зарядка level PRO! 🎮",
+	"Спортивная элита пополнилась! 👑",
+	"Вот это я понимаю - утренний герой! 🦸‍♂️",
+	"Мышцы в шоке от такой заботы! 😱",
+	"Теперь точно будет продуктивный день! 📆",
+	"Зарядка сделана - можно и горы свернуть! ⛰️",
+	"Вот это дисциплина! Вот это сила! 💪",
+	"Утренний воин в деле! ⚔️",
+	"Так-так-так, кто тут у нас такой спортивный? 🏃‍♂️",
+	"Зарядка - check! Теперь мир твой! 🌍",
+	"Вот это энергетика! Можно город освещать! ⚡",
+	"Спортивный режим активирован! 🟢",
+}
+
+func getRandomCongratsMessage() string {
+	return congratsMessages[rand.Intn(len(congratsMessages))]
 }
 
 func (b *Bot) handleStart(message *tgbotapi.Message) error {
@@ -77,7 +131,7 @@ func (b *Bot) handleStart(message *tgbotapi.Message) error {
 		),
 	)
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, "Ребята ежедневно кайфуют от зарядочки. Тоже хочешь?")
+	msg := tgbotapi.NewMessage(message.Chat.ID, messages["want_to_join"])
 	msg.ReplyMarkup = keyboard
 	_, err = b.api.Send(msg)
 	return err
@@ -121,13 +175,7 @@ func (b *Bot) getParticipantsList() ([]struct {
 }
 
 func (b *Bot) handleJoinChallenge(query *tgbotapi.CallbackQuery) error {
-	// First, ask for the name
-	callback := tgbotapi.NewCallback(query.ID, "Как вас записать в список?")
-	if _, err := b.api.Request(callback); err != nil {
-		return err
-	}
-
-	msg := tgbotapi.NewMessage(query.Message.Chat.ID, "Пожалуйста, введите ваше имя:")
+	msg := tgbotapi.NewMessage(query.Message.Chat.ID, messages["enter_name"])
 	msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 	_, err := b.api.Send(msg)
 
@@ -169,18 +217,37 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	}
 
 	currentDate := time.Now().Format("02.01.2006")
-	response := fmt.Sprintf("%s\nУчастники:\n\n", currentDate)
+	response := fmt.Sprintf("%s\n", currentDate)
+
+	// Get today's congrats message if exists
+	today := time.Now().Format("2006-01-02")
+	var congratsMessage sql.NullString
+	err = b.db.QueryRow(`
+		SELECT congrats_message 
+		FROM daily_completions 
+		WHERE user_id = ? AND completed_at = ?
+	`, userID, today).Scan(&congratsMessage)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+
+	if congratsMessage.Valid {
+		response += fmt.Sprintf("%s\n\n", congratsMessage.String)
+	}
+
+	response += "Участники:\n\n"
 
 	for _, p := range participants {
 		status := "ещё нет"
 		if p.Completed {
 			status = "ДА"
 		}
+
 		response += fmt.Sprintf("- %s %s\n", p.Name, status)
 	}
 
 	// Check if user completed today
-	today := time.Now().Format("2006-01-02")
+	today = time.Now().Format("2006-01-02")
 	var completed bool
 	err = b.db.QueryRow(`
 		SELECT EXISTS(
@@ -236,21 +303,23 @@ func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
 	}
 
 	if completed {
-		callback := tgbotapi.NewCallback(query.ID, "Ты уже отметился, не суетись :)")
+		callback := tgbotapi.NewCallback(query.ID, messages["already_completed"])
 		_, err := b.api.Request(callback)
 		return err
 	}
 
-	// Mark as completed
+	congratsMessage := getRandomCongratsMessage()
+
+	// Mark as completed with congrats message
 	_, err = b.db.Exec(`
-		INSERT INTO daily_completions (user_id, completed_at)
-		VALUES (?, ?)
-	`, query.From.ID, today)
+		INSERT INTO daily_completions (user_id, completed_at, congrats_message)
+		VALUES (?, ?, ?)
+	`, query.From.ID, today, congratsMessage)
 	if err != nil {
 		return err
 	}
 
-	callback := tgbotapi.NewCallback(query.ID, "Отлично! Так держать! 💪")
+	callback := tgbotapi.NewCallback(query.ID, congratsMessage)
 	if _, err := b.api.Request(callback); err != nil {
 		return err
 	}
@@ -274,7 +343,7 @@ func (b *Bot) handleUndoComplete(query *tgbotapi.CallbackQuery) error {
 	}
 
 	if !completed {
-		callback := tgbotapi.NewCallback(query.ID, "У вас нет отметки о выполнении за сегодня")
+		callback := tgbotapi.NewCallback(query.ID, messages["no_completion_today"])
 		_, err := b.api.Request(callback)
 		return err
 	}
@@ -288,7 +357,7 @@ func (b *Bot) handleUndoComplete(query *tgbotapi.CallbackQuery) error {
 		return err
 	}
 
-	callback := tgbotapi.NewCallback(query.ID, "Отметка о выполнении отменена")
+	callback := tgbotapi.NewCallback(query.ID, messages["completion_cancelled"])
 	if _, err := b.api.Request(callback); err != nil {
 		return err
 	}
@@ -321,6 +390,8 @@ func main() {
 
 	bot := NewBot(botAPI, db)
 	updates := botAPI.GetUpdatesChan(u)
+
+	rand.Seed(time.Now().UnixNano())
 
 	for update := range updates {
 		var err error
