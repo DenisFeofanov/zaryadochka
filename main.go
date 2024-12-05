@@ -185,9 +185,11 @@ func (b *Bot) getParticipantsList() ([]struct {
 }
 
 func (b *Bot) getIndividualStreak(userID int64) (int, error) {
+	// Start from yesterday and go backwards to get the base streak
 	currentDate := time.Now().AddDate(0, 0, -1)
 	consecutiveDays := 0
 
+	// Get base streak (not including today)
 	for {
 		dateStr := currentDate.Format("2006-01-02")
 
@@ -209,6 +211,25 @@ func (b *Bot) getIndividualStreak(userID int64) (int, error) {
 
 		consecutiveDays++
 		currentDate = currentDate.AddDate(0, 0, -1)
+	}
+
+	// Check if completed today
+	today := time.Now().Format("2006-01-02")
+	var completedToday bool
+	err := b.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM daily_completions 
+			WHERE user_id = ? AND completed_at = ?
+		)
+	`, userID, today).Scan(&completedToday)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Add today to streak if completed
+	if completedToday {
+		consecutiveDays++
 	}
 
 	return consecutiveDays, nil
@@ -475,14 +496,14 @@ func (b *Bot) sendDailyReminders() error {
 }
 
 func (b *Bot) getConsecutiveCompletionDays() (int, error) {
-	// Start from yesterday and go backwards
+	// Start from yesterday and go backwards to get the base streak
 	currentDate := time.Now().AddDate(0, 0, -1)
 	consecutiveDays := 0
 
+	// Get base streak (not including today)
 	for {
 		dateStr := currentDate.Format("2006-01-02")
 
-		// Check if all participants completed on this date
 		var completedCount int
 		err := b.db.QueryRow(`
 			SELECT COUNT(DISTINCT user_id) 
@@ -497,7 +518,6 @@ func (b *Bot) getConsecutiveCompletionDays() (int, error) {
 			return 0, err
 		}
 
-		// Get total participants who were members on that date
 		var totalParticipants int
 		err = b.db.QueryRow(`
 			SELECT COUNT(*) 
@@ -509,13 +529,44 @@ func (b *Bot) getConsecutiveCompletionDays() (int, error) {
 			return 0, err
 		}
 
-		// Break if not all participants completed or if we reach a date with no participants
 		if completedCount != totalParticipants || totalParticipants == 0 {
 			break
 		}
 
 		consecutiveDays++
 		currentDate = currentDate.AddDate(0, 0, -1)
+	}
+
+	// Check if everyone completed today's challenge
+	today := time.Now().Format("2006-01-02")
+	var todayCompletedCount int
+	err := b.db.QueryRow(`
+		SELECT COUNT(DISTINCT user_id) 
+		FROM daily_completions 
+		WHERE completed_at = ? AND user_id IN (
+			SELECT user_id FROM participants
+			WHERE joined_at <= ?
+		)
+	`, today, today).Scan(&todayCompletedCount)
+
+	if err != nil {
+		return 0, err
+	}
+
+	var totalParticipants int
+	err = b.db.QueryRow(`
+		SELECT COUNT(*) 
+		FROM participants 
+		WHERE joined_at <= ?
+	`, today).Scan(&totalParticipants)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Add today to streak if everyone completed
+	if todayCompletedCount == totalParticipants && totalParticipants > 0 {
+		consecutiveDays++
 	}
 
 	return consecutiveDays, nil
