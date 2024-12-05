@@ -56,56 +56,8 @@ func initDB() (*sql.DB, error) {
 	return db, err
 }
 
-var messages = map[string]string{
-	"want_to_join":         "Ребята ежедневно кайфуют от зарядочки. Тоже хочешь?",
-	"enter_name":           "Как к тебе обращаться?",
-	"already_completed":    "Ты уже отметился, не суетись :)",
-	"no_completion_today":  "У вас нет отметки о выполнении за сегодня",
-	"completion_cancelled": "Отметка о выполнении отменена",
-	"reminder":             "Не забудь сделать зарядочку сегодня! 💪",
-}
-
-var congratsMessages = []string{
-	"Красава! 💪 Теперь можно и пельмешей навернуть",
-	"Ого-го! Качаем мышцы, качаем жизнь! 🏋️‍♂️",
-	"Вот это по-нашему! Теперь ты официально круче всех лежебок 😎",
-	"Зарядка сделана, а значит день уже победный! 🏆",
-	"Так держать, спортсмен! Олимпиада уже трепещет 🥇",
-	"Ещё одна тренировка - и ты почти Дуэйн Джонсон! 💪😎",
-	"Вау! Да ты просто машина! 🚀",
-	"Спортивная братва уже гордится тобой! 🤜🤛",
-	"Мышцы подкачаны, характер закален! 💪😤",
-	"Теперь можно и пончик съесть, ты заслужил! 🍩",
-	"Чак Норрис нервно курит в сторонке! 🥋",
-	"Халк бы одобрил такую зарядку! 💚",
-	"Теперь ты официально в клубе утренних чемпионов! 🌅",
-	"Мастер спорта по утренней зарядке! 🎖",
-	"Твои мышцы уже шепчут 'спасибо'! 🗣️",
-	"Ещё немного, и придется расширять дверные проемы! 💪",
-	"Спортивные боги аплодируют стоя! 👏",
-	"Так-так-так, кто тут у нас такой молодец? 🤔",
-	"Мотивация на максималках! 📈",
-	"Качаем не только тело, но и силу воли! 🧠",
-	"Теперь можно и селфи в спортзале! 🤳",
-	"Твой организм говорит 'СПАСИБО'! ❤️",
-	"Вот это настрой! Вот это характер! 🔥",
-	"Ты просто космос! 🚀",
-	"Зарядка level PRO! 🎮",
-	"Спортивная элита пополнилась! 👑",
-	"Вот это я понимаю - утренний герой! 🦸‍♂️",
-	"Мышцы в шоке от такой заботы! 😱",
-	"Теперь точно будет продуктивный день! 📆",
-	"Зарядка сделана - можно и горы свернуть! ⛰️",
-	"Вот это дисциплина! Вот это сила! 💪",
-	"Утренний воин в деле! ⚔️",
-	"Так-так-так, кто тут у нас такой спортивный? 🏃‍♂️",
-	"Зарядка - check! Теперь мир твой! 🌍",
-	"Вот это энергетика! Можно город освещать! ⚡",
-	"Спортивный режим активирован! 🟢",
-}
-
 func getRandomCongratsMessage() string {
-	return congratsMessages[rand.Intn(len(congratsMessages))]
+	return CongratsMessages[rand.Intn(len(CongratsMessages))]
 }
 
 func (b *Bot) handleStart(message *tgbotapi.Message) error {
@@ -132,7 +84,7 @@ func (b *Bot) handleStart(message *tgbotapi.Message) error {
 		),
 	)
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, messages["want_to_join"])
+	msg := tgbotapi.NewMessage(message.Chat.ID, Messages["want_to_join"])
 	msg.ReplyMarkup = keyboard
 	_, err = b.api.Send(msg)
 	return err
@@ -236,7 +188,7 @@ func (b *Bot) getIndividualStreak(userID int64) (int, error) {
 }
 
 func (b *Bot) handleJoinChallenge(query *tgbotapi.CallbackQuery) error {
-	msg := tgbotapi.NewMessage(query.Message.Chat.ID, messages["enter_name"])
+	msg := tgbotapi.NewMessage(query.Message.Chat.ID, Messages["enter_name"])
 	msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 	_, err := b.api.Send(msg)
 
@@ -386,7 +338,7 @@ func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
 	}
 
 	if completed {
-		callback := tgbotapi.NewCallback(query.ID, messages["already_completed"])
+		callback := tgbotapi.NewCallback(query.ID, Messages["already_completed"])
 		_, err := b.api.Request(callback)
 		return err
 	}
@@ -426,7 +378,7 @@ func (b *Bot) handleUndoComplete(query *tgbotapi.CallbackQuery) error {
 	}
 
 	if !completed {
-		callback := tgbotapi.NewCallback(query.ID, messages["no_completion_today"])
+		callback := tgbotapi.NewCallback(query.ID, Messages["no_completion_today"])
 		_, err := b.api.Request(callback)
 		return err
 	}
@@ -440,7 +392,7 @@ func (b *Bot) handleUndoComplete(query *tgbotapi.CallbackQuery) error {
 		return err
 	}
 
-	callback := tgbotapi.NewCallback(query.ID, messages["completion_cancelled"])
+	callback := tgbotapi.NewCallback(query.ID, Messages["completion_cancelled"])
 	if _, err := b.api.Request(callback); err != nil {
 		return err
 	}
@@ -478,7 +430,7 @@ func (b *Bot) sendDailyReminders() error {
 			continue
 		}
 
-		response := messages["reminder"] + "\n\nУчастники:\n\n"
+		response := Messages["reminder"] + "\n\nУчастники:\n\n"
 		for _, p := range participants {
 			status := "⏳"
 			if p.Completed {
