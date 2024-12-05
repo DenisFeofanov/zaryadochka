@@ -141,12 +141,14 @@ func (b *Bot) handleStart(message *tgbotapi.Message) error {
 func (b *Bot) getParticipantsList() ([]struct {
 	Name      string
 	Completed bool
+	Streak    int
 }, error) {
 	today := time.Now().Format("2006-01-02")
 	rows, err := b.db.Query(`
 		SELECT 
 			COALESCE(p.display_name, p.username) as name,
-			CASE WHEN dc.completed_at IS NOT NULL THEN 1 ELSE 0 END as completed
+			CASE WHEN dc.completed_at IS NOT NULL THEN 1 ELSE 0 END as completed,
+			p.user_id
 		FROM participants p
 		LEFT JOIN daily_completions dc 
 			ON p.user_id = dc.user_id 
@@ -161,18 +163,55 @@ func (b *Bot) getParticipantsList() ([]struct {
 	var participants []struct {
 		Name      string
 		Completed bool
+		Streak    int
 	}
 	for rows.Next() {
 		var p struct {
 			Name      string
 			Completed bool
+			Streak    int
 		}
-		if err := rows.Scan(&p.Name, &p.Completed); err != nil {
+		var userID int64
+		if err := rows.Scan(&p.Name, &p.Completed, &userID); err != nil {
+			return nil, err
+		}
+		p.Streak, err = b.getIndividualStreak(userID)
+		if err != nil {
 			return nil, err
 		}
 		participants = append(participants, p)
 	}
 	return participants, nil
+}
+
+func (b *Bot) getIndividualStreak(userID int64) (int, error) {
+	currentDate := time.Now().AddDate(0, 0, -1)
+	consecutiveDays := 0
+
+	for {
+		dateStr := currentDate.Format("2006-01-02")
+
+		var completed bool
+		err := b.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM daily_completions 
+				WHERE user_id = ? AND completed_at = ?
+			)
+		`, userID, dateStr).Scan(&completed)
+
+		if err != nil {
+			return 0, err
+		}
+
+		if !completed {
+			break
+		}
+
+		consecutiveDays++
+		currentDate = currentDate.AddDate(0, 0, -1)
+	}
+
+	return consecutiveDays, nil
 }
 
 func (b *Bot) handleJoinChallenge(query *tgbotapi.CallbackQuery) error {
@@ -239,12 +278,12 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	response += "Участники:\n\n"
 
 	for _, p := range participants {
-		status := "ещё нет"
+		status := "❌"
 		if p.Completed {
-			status = "ДА"
+			status = "✔️"
 		}
 
-		response += fmt.Sprintf("- %s %s\n", p.Name, status)
+		response += fmt.Sprintf("- %s %s (%d %s)\n", status, p.Name, p.Streak, getDayWord(p.Streak))
 	}
 
 	// Check if user completed today
@@ -411,28 +450,8 @@ func (b *Bot) sendDailyReminders() error {
 }
 
 func (b *Bot) getConsecutiveCompletionDays() (int, error) {
-	// Get all participants
-	rows, err := b.db.Query(`SELECT user_id FROM participants`)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-
-	var participantIDs []int64
-	for rows.Next() {
-		var userID int64
-		if err := rows.Scan(&userID); err != nil {
-			return 0, err
-		}
-		participantIDs = append(participantIDs, userID)
-	}
-
-	if len(participantIDs) == 0 {
-		return 0, nil
-	}
-
-	// Start from today and go backwards
-	currentDate := time.Now()
+	// Start from yesterday and go backwards
+	currentDate := time.Now().AddDate(0, 0, -1)
 	consecutiveDays := 0
 
 	for {
