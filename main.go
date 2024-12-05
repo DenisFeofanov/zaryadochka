@@ -256,8 +256,20 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 		return err
 	}
 
+	// Get weekday in Russian
+	weekdays := map[string]string{
+		"Monday":    "Понедельник",
+		"Tuesday":   "Вторник",
+		"Wednesday": "Среда",
+		"Thursday":  "Четверг",
+		"Friday":    "Пятница",
+		"Saturday":  "Суббота",
+		"Sunday":    "Воскресенье",
+	}
+	currentWeekday := weekdays[time.Now().Weekday().String()]
+
 	currentDate := time.Now().Format("02.01.2006")
-	response := fmt.Sprintf("%s\n", currentDate)
+	response := fmt.Sprintf("%s, %s\n", currentWeekday, currentDate)
 
 	// Get today's congrats message if exists
 	today := time.Now().Format("2006-01-02")
