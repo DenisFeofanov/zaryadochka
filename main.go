@@ -278,12 +278,12 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	response += "Участники:\n\n"
 
 	for _, p := range participants {
-		status := "❌"
+		status := "⏳"
 		if p.Completed {
-			status = "✔️"
+			status = "✅"
 		}
 
-		response += fmt.Sprintf("- %s %s (%d %s)\n", status, p.Name, p.Streak, getDayWord(p.Streak))
+		response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, getDayWord(p.Streak))
 	}
 
 	// Check if user completed today
@@ -312,11 +312,9 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 		return err
 	}
 
-	if streak > 0 {
-		response += fmt.Sprintf("\n🔥 Общий стрик: %d %s\n",
-			streak,
-			getDayWord(streak))
-	}
+	response += fmt.Sprintf("\n🔥 Дней подряд: %d\n",
+		streak,
+	)
 
 	msg := tgbotapi.NewMessage(chatID, response)
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
@@ -498,6 +496,9 @@ func (b *Bot) getConsecutiveCompletionDays() (int, error) {
 
 // Helper function to get the correct form of "день/дня/дней"
 func getDayWord(days int) string {
+	if days == 0 {
+		return "дней"
+	}
 	if days%10 == 1 && days%100 != 11 {
 		return "день"
 	}
