@@ -439,7 +439,22 @@ func (b *Bot) sendDailyReminders() error {
 			continue
 		}
 
-		msg := tgbotapi.NewMessage(chatID, messages["reminder"])
+		participants, err := b.getParticipantsList()
+		if err != nil {
+			log.Printf("Error getting participants list: %v", err)
+			continue
+		}
+
+		response := messages["reminder"] + "\n\nУчастники:\n\n"
+		for _, p := range participants {
+			status := "⏳"
+			if p.Completed {
+				status = "✅"
+			}
+			response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, getDayWord(p.Streak))
+		}
+
+		msg := tgbotapi.NewMessage(chatID, response)
 		if _, err := b.api.Send(msg); err != nil {
 			log.Printf("Error sending reminder to user %d: %v", userID, err)
 		}
@@ -551,6 +566,53 @@ func (b *Bot) TestFillCompletions(days int, notEveryoneCompletes bool) error {
 	return nil
 }
 
+func (b *Bot) sendLastChanceReminders() error {
+	today := time.Now().Format("2006-01-02")
+
+	// Get all participants who haven't completed today's challenge
+	rows, err := b.db.Query(`
+		SELECT p.user_id, p.chat_id 
+		FROM participants p
+		LEFT JOIN daily_completions dc 
+			ON p.user_id = dc.user_id 
+			AND dc.completed_at = ?
+		WHERE dc.user_id IS NULL
+	`, today)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var userID, chatID int64
+		if err := rows.Scan(&userID, &chatID); err != nil {
+			log.Printf("Error scanning user: %v", err)
+			continue
+		}
+
+		participants, err := b.getParticipantsList()
+		if err != nil {
+			log.Printf("Error getting participants list: %v", err)
+			continue
+		}
+
+		response := "Последний шанс!\n\nУчастники:\n\n"
+		for _, p := range participants {
+			status := "⏳"
+			if p.Completed {
+				status = "✅"
+			}
+			response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, getDayWord(p.Streak))
+		}
+
+		msg := tgbotapi.NewMessage(chatID, response)
+		if _, err := b.api.Send(msg); err != nil {
+			log.Printf("Error sending last chance reminder to user %d: %v", userID, err)
+		}
+	}
+	return nil
+}
+
 func main() {
 	// Load env variables
 	err := godotenv.Load()
@@ -586,14 +648,28 @@ func main() {
 		defer wg.Done()
 		for {
 			now := time.Now()
-			next := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
-			if now.After(next) {
-				next = next.Add(24 * time.Hour)
+			nextNoon := time.Date(now.Year(), now.Month(), now.Day(), 14, 57, 0, 0, now.Location())
+			nextEvening := time.Date(now.Year(), now.Month(), now.Day(), 21, 0, 0, 0, now.Location())
+
+			if now.After(nextNoon) {
+				nextNoon = nextNoon.Add(24 * time.Hour)
 			}
-			timer := time.NewTimer(next.Sub(now))
-			<-timer.C
-			if err := bot.sendDailyReminders(); err != nil {
-				log.Printf("Error sending daily reminders: %v", err)
+			if now.After(nextEvening) {
+				nextEvening = nextEvening.Add(24 * time.Hour)
+			}
+
+			noonTimer := time.NewTimer(nextNoon.Sub(now))
+			eveningTimer := time.NewTimer(nextEvening.Sub(now))
+
+			select {
+			case <-noonTimer.C:
+				if err := bot.sendDailyReminders(); err != nil {
+					log.Printf("Error sending daily reminders: %v", err)
+				}
+			case <-eveningTimer.C:
+				if err := bot.sendLastChanceReminders(); err != nil {
+					log.Printf("Error sending last chance reminders: %v", err)
+				}
 			}
 		}
 	}()
