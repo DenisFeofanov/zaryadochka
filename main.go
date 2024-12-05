@@ -244,22 +244,6 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	currentDate := time.Now().Format("02.01.2006")
 	response := fmt.Sprintf("%s, %s\n", currentWeekday, currentDate)
 
-	// Get today's congrats message if exists
-	today := time.Now().Format("2006-01-02")
-	var congratsMessage sql.NullString
-	err = b.db.QueryRow(`
-		SELECT congrats_message 
-		FROM daily_completions 
-		WHERE user_id = ? AND completed_at = ?
-	`, userID, today).Scan(&congratsMessage)
-	if err != nil && err != sql.ErrNoRows {
-		return err
-	}
-
-	if congratsMessage.Valid {
-		response += fmt.Sprintf("%s\n\n", congratsMessage.String)
-	}
-
 	response += "Участники:\n\n"
 
 	for _, p := range participants {
@@ -272,7 +256,7 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	}
 
 	// Check if user completed today
-	today = time.Now().Format("2006-01-02")
+	today := time.Now().Format("2006-01-02")
 	var completed bool
 	err = b.db.QueryRow(`
 		SELECT EXISTS(
@@ -282,13 +266,6 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	`, userID, today).Scan(&completed)
 	if err != nil {
 		return err
-	}
-
-	var actionButton tgbotapi.InlineKeyboardButton
-	if completed {
-		actionButton = tgbotapi.NewInlineKeyboardButtonData("Отменить зарядочку", "undo_complete")
-	} else {
-		actionButton = tgbotapi.NewInlineKeyboardButtonData("Сделать зарядочку", "complete_challenge")
 	}
 
 	// Add streak information to the response
@@ -301,13 +278,18 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 		streak,
 	)
 
-	msg := tgbotapi.NewMessage(chatID, response)
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Обновить", "update_list"),
-			actionButton,
+	// Create a reply keyboard with options
+	replyKeyboard := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("Обновить"),
+			tgbotapi.NewKeyboardButton("Сделать зарядочку"),
 		),
 	)
+	replyKeyboard.ResizeKeyboard = true // Make keyboard smaller
+	replyKeyboard.Selective = true
+
+	msg := tgbotapi.NewMessage(chatID, response)
+	msg.ReplyMarkup = replyKeyboard
 	_, err = b.api.Send(msg)
 	return err
 }
@@ -338,8 +320,9 @@ func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
 	}
 
 	if completed {
-		callback := tgbotapi.NewCallback(query.ID, Messages["already_completed"])
-		_, err := b.api.Request(callback)
+		// For reply keyboard, send a message instead of callback
+		msg := tgbotapi.NewMessage(query.Message.Chat.ID, Messages["already_completed"])
+		_, err := b.api.Send(msg)
 		return err
 	}
 
@@ -354,11 +337,14 @@ func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
 		return err
 	}
 
-	callback := tgbotapi.NewCallback(query.ID, congratsMessage)
-	if _, err := b.api.Request(callback); err != nil {
+	// Send congrats message
+	msg := tgbotapi.NewMessage(query.Message.Chat.ID, congratsMessage)
+	_, err = b.api.Send(msg)
+	if err != nil {
 		return err
 	}
 
+	// Show updated list
 	return b.sendParticipantsList(query.Message.Chat.ID, query.From.ID)
 }
 
@@ -692,38 +678,44 @@ func main() {
 	for update := range updates {
 		var err error
 		if update.Message != nil {
-			if update.Message.Text == "/start" {
+			switch update.Message.Text {
+			case "/start":
 				err = bot.handleStart(update.Message)
-			} else if update.Message.Text == "/test10" {
-				// Fill in 10 days of perfect completions
+			case "Обновить":
+				err = bot.sendParticipantsList(update.Message.Chat.ID, update.Message.From.ID)
+			case "Сделать зарядочку":
+				// Create a fake callback query to reuse existing logic
+				fakeQuery := &tgbotapi.CallbackQuery{
+					Message: update.Message,
+					From:    update.Message.From,
+					Data:    "complete_challenge",
+				}
+				err = bot.handleCompleteChallenge(fakeQuery)
+			case "/test10":
 				err = bot.TestFillCompletions(10, false)
-			} else if update.Message.Text == "/test5random" {
-				// Fill in 5 days with random skips
+			case "/test5random":
 				err = bot.TestFillCompletions(5, true)
-			} else if update.Message.ReplyToMessage != nil {
-				// Check if user is in pending_joins
-				var exists bool
-				err = bot.db.QueryRow(`
-					SELECT EXISTS(
-						SELECT 1 FROM pending_joins 
-						WHERE user_id = ? AND chat_id = ?
-					)
-				`, update.Message.From.ID, update.Message.Chat.ID).Scan(&exists)
+			default:
+				// Handle name response if applicable
+				if update.Message.ReplyToMessage != nil {
+					var exists bool
+					err = bot.db.QueryRow(`
+						SELECT EXISTS(
+							SELECT 1 FROM pending_joins 
+							WHERE user_id = ? AND chat_id = ?
+						)
+					`, update.Message.From.ID, update.Message.Chat.ID).Scan(&exists)
 
-				if err == nil && exists {
-					err = bot.handleNameResponse(update.Message)
+					if err == nil && exists {
+						err = bot.handleNameResponse(update.Message)
+					}
 				}
 			}
 		} else if update.CallbackQuery != nil {
+			// Keep existing callback query handling for the initial join button
 			switch update.CallbackQuery.Data {
 			case "join_challenge":
 				err = bot.handleJoinChallenge(update.CallbackQuery)
-			case "update_list":
-				err = bot.handleUpdateList(update.CallbackQuery)
-			case "complete_challenge":
-				err = bot.handleCompleteChallenge(update.CallbackQuery)
-			case "undo_complete":
-				err = bot.handleUndoComplete(update.CallbackQuery)
 			}
 		}
 
