@@ -488,6 +488,49 @@ func getDayWord(days int) string {
 	return "дней"
 }
 
+// TestFillCompletions fills in completion records for the specified number of days
+// If notEveryoneCompletes is true, it will randomly skip some completions
+func (b *Bot) TestFillCompletions(days int, notEveryoneCompletes bool) error {
+	// Get all participants
+	rows, err := b.db.Query(`SELECT user_id FROM participants`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var participants []int64
+	for rows.Next() {
+		var userID int64
+		if err := rows.Scan(&userID); err != nil {
+			return err
+		}
+		participants = append(participants, userID)
+	}
+
+	// Fill completions for each day
+	for i := days - 1; i >= 0; i-- {
+		date := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
+
+		for _, userID := range participants {
+			// If notEveryoneCompletes is true, randomly skip some completions
+			if notEveryoneCompletes && rand.Float32() < 0.3 { // 30% chance to skip
+				continue
+			}
+
+			congratsMessage := getRandomCongratsMessage()
+			_, err = b.db.Exec(`
+				INSERT OR REPLACE INTO daily_completions (user_id, completed_at, congrats_message)
+				VALUES (?, ?, ?)
+			`, userID, date, congratsMessage)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	// Load env variables
 	err := godotenv.Load()
@@ -540,6 +583,12 @@ func main() {
 		if update.Message != nil {
 			if update.Message.Text == "/start" {
 				err = bot.handleStart(update.Message)
+			} else if update.Message.Text == "/test10" {
+				// Fill in 10 days of perfect completions
+				err = bot.TestFillCompletions(10, false)
+			} else if update.Message.Text == "/test5random" {
+				// Fill in 5 days with random skips
+				err = bot.TestFillCompletions(5, true)
 			} else if update.Message.ReplyToMessage != nil {
 				// Check if user is in pending_joins
 				var exists bool
