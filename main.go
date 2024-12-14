@@ -27,9 +27,25 @@ func NewBot(api *tgbotapi.BotAPI, db *sql.DB) *Bot {
 }
 
 func initDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", "./data/database.db")
+	// Create data directory if it doesn't exist
+	if err := os.MkdirAll("./data", 0700); err != nil {
+		return nil, fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	dbPath := "./data/database.db"
+
+	// Create the database file if it doesn't exist
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		file, err := os.Create(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create database file: %w", err)
+		}
+		file.Close()
+	}
+
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	_, err = db.Exec(`
@@ -53,7 +69,11 @@ func initDB() (*sql.DB, error) {
 			FOREIGN KEY (user_id) REFERENCES participants(user_id)
 		);
 	`)
-	return db, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	return db, nil
 }
 
 func getRandomCongratsMessage() string {
@@ -620,6 +640,13 @@ func main() {
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
+
+	db, err := initDB()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
 	botAPI, err := tgbotapi.NewBotAPI(os.Getenv("BOT_TOKEN"))
 	if err != nil {
 		log.Panic(err)
@@ -630,12 +657,6 @@ func main() {
 	log.Printf("Authorized on account %s", botAPI.Self.UserName)
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-
-	db, err := initDB()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
 
 	bot := NewBot(botAPI, db)
 	updates := botAPI.GetUpdatesChan(u)
