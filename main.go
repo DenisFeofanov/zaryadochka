@@ -670,7 +670,7 @@ func main() {
 		defer wg.Done()
 		for {
 			now := time.Now()
-			nextNoon := time.Date(now.Year(), now.Month(), now.Day(), 14, 57, 0, 0, now.Location())
+			nextNoon := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
 			nextEvening := time.Date(now.Year(), now.Month(), now.Day(), 21, 0, 0, 0, now.Location())
 
 			if now.After(nextNoon) {
