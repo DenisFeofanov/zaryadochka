@@ -16,6 +16,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           password: ${{ secrets.SSH_PASSWORD }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
           script: |
             cd /zaryadochka  # Change this to your app's directory
             git checkout main # Switch to main branch
