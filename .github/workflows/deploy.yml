@@ -3,10 +3,7 @@ name: Deploy to Debian Server
 on:
   push:
     branches:
-      - test2
-  pull_request:
-    branches:
-      - test2
+      - main
 
 jobs:
   deploy:
