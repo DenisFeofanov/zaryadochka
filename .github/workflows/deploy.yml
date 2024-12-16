@@ -1,26 +1,26 @@
-name: Deploy to Server
+name: Deploy to Debian Server
 
 on:
   push:
     branches:
-      - main
+      - test2
+  pull_request:
+    branches:
+      - test2
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Deploy to server
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-        run: |
-          echo "$SSH_PRIVATE_KEY" > private_key
-          chmod 600 private_key
-          ssh -i private_key -o StrictHostKeyChecking=no $SSH_USER@$SSH_HOST << 'EOF'
+      - name: Deploy to Debian server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSS_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
             cd /zaryadochka  # Change this to your app's directory
+            git checkout main # Switch to main branch
             git pull origin main  # Pull the latest code
             go build # Build the application
             sudo systemctl restart zaryadochka.service  # Restart the service
-          EOF
