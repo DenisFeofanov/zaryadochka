@@ -15,10 +15,9 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          password: ${{ secrets.SSH_PASSWORD }}
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
           script: |
-            cd /zaryadochka  # Change this to your app's directory
+            cd /root/zaryadochka  # Change this to your app's directory
             git checkout main # Switch to main branch
             git pull origin main  # Pull the latest code
             go build # Build the application
