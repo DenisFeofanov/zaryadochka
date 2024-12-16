@@ -251,7 +251,7 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 
 	// Get weekday in Russian
 	weekdays := map[string]string{
-		"Monday":    "Понедельник",
+		"Monday":    "Понедельник ;)",
 		"Tuesday":   "Вторник",
 		"Wednesday": "Среда",
 		"Thursday":  "Четверг",
