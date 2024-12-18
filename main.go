@@ -669,9 +669,13 @@ func main() {
 	go func() {
 		defer wg.Done()
 		for {
-			now := time.Now()
-			nextNoon := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
-			nextEvening := time.Date(now.Year(), now.Month(), now.Day(), 21, 0, 0, 0, now.Location())
+			loc, err := time.LoadLocation("Asia/Yekaterinburg")
+			if err != nil {
+				log.Fatalf("Error loading location: %v", err)
+			}
+			now := time.Now().In(loc)
+			nextNoon := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, loc)
+			nextEvening := time.Date(now.Year(), now.Month(), now.Day(), 21, 0, 0, 0, loc)
 
 			if now.After(nextNoon) {
 				nextNoon = nextNoon.Add(24 * time.Hour)
