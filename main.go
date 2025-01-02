@@ -169,7 +169,7 @@ func (b *Bot) getIndividualStreak(userID int64) (int, error) {
 		err := b.db.QueryRow(`
 			SELECT EXISTS(
 				SELECT 1 FROM daily_completions 
-				WHERE user_id = ? AND completed_at = ?
+				WHERE user_id = ? AND date(completed_at) = date(?)
 			)
 		`, userID, dateStr).Scan(&completed)
 
@@ -191,7 +191,7 @@ func (b *Bot) getIndividualStreak(userID int64) (int, error) {
 	err := b.db.QueryRow(`
 		SELECT EXISTS(
 			SELECT 1 FROM daily_completions 
-			WHERE user_id = ? AND completed_at = ?
+			WHERE user_id = ? AND date(completed_at) = date(?)
 		)
 	`, userID, today).Scan(&completedToday)
 
