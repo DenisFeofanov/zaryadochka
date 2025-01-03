@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand"
 	"os"
 	"sync"
@@ -15,14 +16,16 @@ import (
 )
 
 type Bot struct {
-	api *tgbotapi.BotAPI
-	db  *sql.DB
+	api    *tgbotapi.BotAPI
+	db     *sql.DB
+	logger *slog.Logger
 }
 
 func NewBot(api *tgbotapi.BotAPI, db *sql.DB) *Bot {
 	return &Bot{
-		api: api,
-		db:  db,
+		api:    api,
+		db:     db,
+		logger: slog.Default(),
 	}
 }
 
@@ -106,7 +109,7 @@ func (b *Bot) handleStart(message *tgbotapi.Message) error {
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, Messages["want_to_join"])
 	msg.ReplyMarkup = keyboard
-	_, err = b.api.Send(msg)
+	_, err = b.sendMessage(msg)
 	return err
 }
 
@@ -210,7 +213,7 @@ func (b *Bot) getIndividualStreak(userID int64) (int, error) {
 func (b *Bot) handleJoinChallenge(query *tgbotapi.CallbackQuery) error {
 	msg := tgbotapi.NewMessage(query.Message.Chat.ID, Messages["enter_name"])
 	msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
-	_, err := b.api.Send(msg)
+	_, err := b.sendMessage(msg)
 
 	// Store temporary state in DB to handle the name response
 	_, err = b.db.Exec(`
@@ -310,7 +313,7 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 
 	msg := tgbotapi.NewMessage(chatID, response)
 	msg.ReplyMarkup = replyKeyboard
-	_, err = b.api.Send(msg)
+	_, err = b.sendMessage(msg)
 	return err
 }
 
@@ -359,7 +362,7 @@ func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
 
 	// Send congrats message
 	msg := tgbotapi.NewMessage(query.Message.Chat.ID, congratsMessage)
-	_, err = b.api.Send(msg)
+	_, err = b.sendMessage(msg)
 	if err != nil {
 		return err
 	}
@@ -426,13 +429,13 @@ func (b *Bot) sendDailyReminders() error {
 	for rows.Next() {
 		var userID, chatID int64
 		if err := rows.Scan(&userID, &chatID); err != nil {
-			log.Printf("Error scanning user: %v", err)
+			b.logger.Error("error scanning user", "error", err)
 			continue
 		}
 
 		participants, err := b.getParticipantsList()
 		if err != nil {
-			log.Printf("Error getting participants list: %v", err)
+			b.logger.Error("error getting participants list", "error", err)
 			continue
 		}
 
@@ -446,8 +449,11 @@ func (b *Bot) sendDailyReminders() error {
 		}
 
 		msg := tgbotapi.NewMessage(chatID, response)
-		if _, err := b.api.Send(msg); err != nil {
-			log.Printf("Error sending reminder to user %d: %v", userID, err)
+		if _, err := b.sendMessage(msg); err != nil {
+			b.logger.Error("error sending reminder",
+				"user_id", userID,
+				"error", err,
+			)
 		}
 	}
 	return nil
@@ -607,13 +613,13 @@ func (b *Bot) sendLastChanceReminders() error {
 	for rows.Next() {
 		var userID, chatID int64
 		if err := rows.Scan(&userID, &chatID); err != nil {
-			log.Printf("Error scanning user: %v", err)
+			b.logger.Error("error scanning user", "error", err)
 			continue
 		}
 
 		participants, err := b.getParticipantsList()
 		if err != nil {
-			log.Printf("Error getting participants list: %v", err)
+			b.logger.Error("error getting participants list", "error", err)
 			continue
 		}
 
@@ -627,34 +633,100 @@ func (b *Bot) sendLastChanceReminders() error {
 		}
 
 		msg := tgbotapi.NewMessage(chatID, response)
-		if _, err := b.api.Send(msg); err != nil {
-			log.Printf("Error sending last chance reminder to user %d: %v", userID, err)
+		if _, err := b.sendMessage(msg); err != nil {
+			b.logger.Error("error sending last chance reminder",
+				"user_id", userID,
+				"error", err,
+			)
 		}
 	}
 	return nil
 }
 
+// Helper functions for consistent logging
+func getChatID(update tgbotapi.Update) int64 {
+	if update.Message != nil {
+		return update.Message.Chat.ID
+	}
+	if update.CallbackQuery != nil {
+		return update.CallbackQuery.Message.Chat.ID
+	}
+	return 0
+}
+
+func getUserID(update tgbotapi.Update) int64 {
+	if update.Message != nil {
+		return update.Message.From.ID
+	}
+	if update.CallbackQuery != nil {
+		return update.CallbackQuery.From.ID
+	}
+	return 0
+}
+
+func getUpdateType(update tgbotapi.Update) string {
+	if update.Message != nil {
+		return "message"
+	}
+	if update.CallbackQuery != nil {
+		return "callback_query"
+	}
+	return "unknown"
+}
+
+// Helper method for sending messages with logging
+func (b *Bot) sendMessage(msg tgbotapi.MessageConfig) (tgbotapi.Message, error) {
+	sent, err := b.api.Send(msg)
+	if err != nil {
+		b.logger.Error("failed to send message",
+			"chat_id", msg.ChatID,
+			"text", msg.Text,
+			"error", err,
+		)
+		return sent, err
+	}
+
+	b.logger.Info("sent message",
+		"chat_id", msg.ChatID,
+		"text", msg.Text,
+		"message_id", sent.MessageID,
+	)
+	return sent, nil
+}
+
 func main() {
+	// Configure structured logging
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	slog.SetDefault(logger)
+
 	// Load env variables
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		slog.Error("failed to load .env file", "error", err)
+		os.Exit(1)
 	}
 
 	db, err := initDB()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("failed to initialize database", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	botAPI, err := tgbotapi.NewBotAPI(os.Getenv("BOT_TOKEN"))
 	if err != nil {
-		log.Panic(err)
+		slog.Error("failed to create bot API", "error", err)
+		os.Exit(1)
 	}
 
 	// Set up bot's config
-	botAPI.Debug = true
-	log.Printf("Authorized on account %s", botAPI.Self.UserName)
+	botAPI.Debug = false
+	slog.Info("bot authorized successfully",
+		"username", botAPI.Self.UserName,
+		"debug_mode", botAPI.Debug,
+	)
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
@@ -690,11 +762,17 @@ func main() {
 			select {
 			case <-noonTimer.C:
 				if err := bot.sendDailyReminders(); err != nil {
-					log.Printf("Error sending daily reminders: %v", err)
+					slog.Error("failed to send daily reminders",
+						"error", err,
+						"time", time.Now(),
+					)
 				}
 			case <-eveningTimer.C:
 				if err := bot.sendLastChanceReminders(); err != nil {
-					log.Printf("Error sending last chance reminders: %v", err)
+					slog.Error("failed to send last chance reminders",
+						"error", err,
+						"time", time.Now(),
+					)
 				}
 			}
 		}
@@ -702,7 +780,20 @@ func main() {
 
 	for update := range updates {
 		var err error
+
+		// Add context logging for each update
+		logger := slog.With(
+			"update_id", update.UpdateID,
+			"chat_id", getChatID(update),
+			"user_id", getUserID(update),
+		)
+
 		if update.Message != nil {
+			logger.Info("received message",
+				"text", update.Message.Text,
+				"from", update.Message.From.UserName,
+				"message_id", update.Message.MessageID,
+			)
 			switch update.Message.Text {
 			case "/start":
 				err = bot.handleStart(update.Message)
@@ -737,6 +828,10 @@ func main() {
 				}
 			}
 		} else if update.CallbackQuery != nil {
+			logger.Info("received callback query",
+				"data", update.CallbackQuery.Data,
+				"from", update.CallbackQuery.From.UserName,
+			)
 			// Keep existing callback query handling for the initial join button
 			switch update.CallbackQuery.Data {
 			case "join_challenge":
@@ -745,7 +840,10 @@ func main() {
 		}
 
 		if err != nil {
-			log.Printf("Error handling update: %v", err)
+			logger.Error("failed to handle update",
+				"error", err,
+				"update_type", getUpdateType(update),
+			)
 		}
 	}
 
