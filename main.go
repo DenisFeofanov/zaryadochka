@@ -80,6 +80,14 @@ func initDB() (*sql.DB, error) {
 			PRIMARY KEY (user_id, achievement_type),
 			FOREIGN KEY (user_id) REFERENCES participants(user_id)
 		);
+		CREATE TABLE IF NOT EXISTS bot_state (
+			user_id INTEGER,
+			chat_id INTEGER,
+			state TEXT,
+			context TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (user_id, chat_id)
+		);
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
@@ -948,68 +956,6 @@ func (b *Bot) getWalkOfFame() ([]struct {
 	return fame, nil
 }
 
-// handleSetStreak processes the /setstreak command with parameters: userId streakDays
-func (b *Bot) handleSetStreak(message *tgbotapi.Message) error {
-	// Parse the command text to extract userId and streakDays
-	var userID int64
-	var streakDays int
-
-	// The command format should be: /setstreak userId streakDays
-	// Split the command text by spaces
-	parts := strings.Fields(message.Text)
-
-	// Check if the command has the correct number of parameters
-	if len(parts) != 3 {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Неправильный формат команды. Используйте: /setstreak userId количествоДней")
-		_, err := b.sendMessage(msg)
-		return err
-	}
-
-	// Parse userId
-	parsedUserID, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Некорректный ID пользователя. Должно быть целое число.")
-		_, err := b.sendMessage(msg)
-		return err
-	}
-	userID = parsedUserID
-
-	// Parse streakDays
-	parsedDays, err := strconv.Atoi(parts[2])
-	if err != nil || parsedDays < 0 {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Некорректное количество дней. Должно быть положительное целое число.")
-		_, err := b.sendMessage(msg)
-		return err
-	}
-	streakDays = parsedDays
-
-	// Set the streak
-	err = b.SetUserStreak(userID, streakDays)
-	if err != nil {
-		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Ошибка при установке серии: %s", err.Error()))
-		_, err := b.sendMessage(msg)
-		return err
-	}
-
-	// Get the user's name
-	var name string
-	err = b.db.QueryRow(`SELECT COALESCE(display_name, username) FROM participants WHERE user_id = ?`, userID).Scan(&name)
-	if err != nil {
-		// If there's an error, just use the userID as a fallback
-		name = fmt.Sprintf("пользователя (ID: %d)", userID)
-	}
-
-	// Send success message
-	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Серия для %s установлена на %d %s", name, streakDays, GetDayWord(streakDays)))
-	_, err = b.sendMessage(msg)
-	if err != nil {
-		return err
-	}
-
-	// Show updated list
-	return b.sendParticipantsList(message.Chat.ID, message.From.ID)
-}
-
 // handleListUserIDs lists all participants with their IDs
 func (b *Bot) handleListUserIDs(message *tgbotapi.Message) error {
 	rows, err := b.db.Query(`
@@ -1041,6 +987,265 @@ func (b *Bot) handleListUserIDs(message *tgbotapi.Message) error {
 	msg := tgbotapi.NewMessage(message.Chat.ID, response)
 	_, err = b.sendMessage(msg)
 	return err
+}
+
+// handleAdjustStreak combines listing users and setting streak in one interactive command
+func (b *Bot) handleAdjustStreak(message *tgbotapi.Message) error {
+	// Step 1: Get the list of users
+	rows, err := b.db.Query(`
+		SELECT 
+			user_id, 
+			COALESCE(display_name, username) as name
+		FROM participants
+		ORDER BY joined_at
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	// Build a keyboard with buttons for each user
+	var keyboard [][]tgbotapi.InlineKeyboardButton
+
+	for rows.Next() {
+		var userID int64
+		var name string
+		if err := rows.Scan(&userID, &name); err != nil {
+			return err
+		}
+
+		// Create a button for each user with callback data in format "adjust_streak:userID:name"
+		callbackData := fmt.Sprintf("adjust_streak:%d:%s", userID, name)
+		// Truncate callback data if it's too long (Telegram has a 64 byte limit)
+		if len(callbackData) > 64 {
+			// Keep the userID part intact but truncate the name
+			callbackData = fmt.Sprintf("adjust_streak:%d:%s", userID, name[:40])
+		}
+
+		row := []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("👤 %s", name),
+				callbackData,
+			),
+		}
+		keyboard = append(keyboard, row)
+	}
+
+	// Send the message with the keyboard
+	msg := tgbotapi.NewMessage(message.Chat.ID, "Выберите пользователя для установки серии зарядок:")
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(keyboard...)
+	_, err = b.sendMessage(msg)
+	return err
+}
+
+// handleAdjustStreakCallback processes the callback when a user is selected for streak adjustment
+func (b *Bot) handleAdjustStreakCallback(query *tgbotapi.CallbackQuery) error {
+	// Parse the callback data: "adjust_streak:userID:name"
+	parts := strings.Split(query.Data, ":")
+	if len(parts) < 3 {
+		return fmt.Errorf("invalid callback data format")
+	}
+
+	userID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return err
+	}
+
+	// Get the name (parts[2] might be truncated, so fetch from DB to be sure)
+	var name string
+	err = b.db.QueryRow(`SELECT COALESCE(display_name, username) FROM participants WHERE user_id = ?`, userID).Scan(&name)
+	if err != nil {
+		// If there's an error, use what we have from the callback
+		name = parts[2]
+	}
+
+	// Create a keyboard with buttons for common streak values
+	keyboard := [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonData("0 дней", fmt.Sprintf("set_streak:%d:0", userID)),
+			tgbotapi.NewInlineKeyboardButtonData("7 дней", fmt.Sprintf("set_streak:%d:7", userID)),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("30 дней", fmt.Sprintf("set_streak:%d:30", userID)),
+			tgbotapi.NewInlineKeyboardButtonData("100 дней", fmt.Sprintf("set_streak:%d:100", userID)),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("Другое значение ✏️", fmt.Sprintf("custom_streak:%d", userID)),
+		},
+	}
+
+	// Clear the previous keyboard and show the streak options
+	editMsg := tgbotapi.NewEditMessageText(
+		query.Message.Chat.ID,
+		query.Message.MessageID,
+		fmt.Sprintf("Установка серии для пользователя 👤 %s\nВыберите количество дней:", name),
+	)
+	editMsg.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: keyboard}
+
+	_, err = b.api.Send(editMsg)
+	return err
+}
+
+// handleSetStreakCallback processes the callback when a streak value is selected
+func (b *Bot) handleSetStreakCallback(query *tgbotapi.CallbackQuery) error {
+	// Parse the callback data: "set_streak:userID:days"
+	parts := strings.Split(query.Data, ":")
+	if len(parts) != 3 {
+		return fmt.Errorf("invalid callback data format")
+	}
+
+	userID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return err
+	}
+
+	days, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return err
+	}
+
+	// Set the streak
+	err = b.SetUserStreak(userID, days)
+	if err != nil {
+		// Edit message to show error
+		editMsg := tgbotapi.NewEditMessageText(
+			query.Message.Chat.ID,
+			query.Message.MessageID,
+			fmt.Sprintf("❌ Ошибка при установке серии: %s", err.Error()),
+		)
+		_, err = b.api.Send(editMsg)
+		return err
+	}
+
+	// Get the user's name
+	var name string
+	err = b.db.QueryRow(`SELECT COALESCE(display_name, username) FROM participants WHERE user_id = ?`, userID).Scan(&name)
+	if err != nil {
+		// If there's an error, use a generic name
+		name = fmt.Sprintf("пользователя (ID: %d)", userID)
+	}
+
+	// Edit the message to show success
+	editMsg := tgbotapi.NewEditMessageText(
+		query.Message.Chat.ID,
+		query.Message.MessageID,
+		fmt.Sprintf("✅ Серия для %s установлена на %d %s", name, days, GetDayWord(days)),
+	)
+	_, err = b.api.Send(editMsg)
+	if err != nil {
+		return err
+	}
+
+	// Show updated list
+	return b.sendParticipantsList(query.Message.Chat.ID, query.From.ID)
+}
+
+// handleCustomStreakCallback initiates the custom streak input process
+func (b *Bot) handleCustomStreakCallback(query *tgbotapi.CallbackQuery) error {
+	// Parse the callback data: "custom_streak:userID"
+	parts := strings.Split(query.Data, ":")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid callback data format")
+	}
+
+	userID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return err
+	}
+
+	// Get the user's name
+	var name string
+	err = b.db.QueryRow(`SELECT COALESCE(display_name, username) FROM participants WHERE user_id = ?`, userID).Scan(&name)
+	if err != nil {
+		// If there's an error, use a generic name
+		name = fmt.Sprintf("пользователя (ID: %d)", userID)
+	}
+
+	// Save the state in the database to remember we're waiting for a custom streak value
+	_, err = b.db.Exec(`
+		INSERT OR REPLACE INTO bot_state (user_id, chat_id, state, context)
+		VALUES (?, ?, 'waiting_custom_streak', ?)
+	`, query.From.ID, query.Message.Chat.ID, strconv.FormatInt(userID, 10))
+	if err != nil {
+		return err
+	}
+
+	// Edit the message to prompt for custom streak input
+	editMsg := tgbotapi.NewEditMessageText(
+		query.Message.Chat.ID,
+		query.Message.MessageID,
+		fmt.Sprintf("Введите целое число для установки серии зарядок для пользователя 👤 %s:", name),
+	)
+	// Remove the inline keyboard
+	editMsg.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{}
+
+	_, err = b.api.Send(editMsg)
+	return err
+}
+
+// handleCustomStreakInput processes the custom streak value entered by the user
+func (b *Bot) handleCustomStreakInput(message *tgbotapi.Message) error {
+	// Get the state from the database
+	var state string
+	var context string
+	err := b.db.QueryRow(`
+		SELECT state, context FROM bot_state 
+		WHERE user_id = ? AND chat_id = ? AND state = 'waiting_custom_streak'
+	`, message.From.ID, message.Chat.ID).Scan(&state, &context)
+
+	if err != nil {
+		// If no state is found, ignore
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	// Parse the target user ID from the context
+	targetUserID, err := strconv.ParseInt(context, 10, 64)
+	if err != nil {
+		return err
+	}
+
+	// Parse the days value from the message
+	days, err := strconv.Atoi(strings.TrimSpace(message.Text))
+	if err != nil || days < 0 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Пожалуйста, введите положительное целое число для серии зарядок.")
+		_, err = b.sendMessage(msg)
+		return err
+	}
+
+	// Set the streak
+	err = b.SetUserStreak(targetUserID, days)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Ошибка при установке серии: %s", err.Error()))
+		_, err = b.sendMessage(msg)
+		return err
+	}
+
+	// Clear the state
+	_, err = b.db.Exec(`DELETE FROM bot_state WHERE user_id = ? AND chat_id = ?`, message.From.ID, message.Chat.ID)
+	if err != nil {
+		return err
+	}
+
+	// Get the user's name
+	var name string
+	err = b.db.QueryRow(`SELECT COALESCE(display_name, username) FROM participants WHERE user_id = ?`, targetUserID).Scan(&name)
+	if err != nil {
+		// If there's an error, use a generic name
+		name = fmt.Sprintf("пользователя (ID: %d)", targetUserID)
+	}
+
+	// Send success message
+	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Серия для %s установлена на %d %s", name, days, GetDayWord(days)))
+	_, err = b.sendMessage(msg)
+	if err != nil {
+		return err
+	}
+
+	// Show updated list
+	return b.sendParticipantsList(message.Chat.ID, message.From.ID)
 }
 
 func main() {
@@ -1156,19 +1361,30 @@ func main() {
 					Data:    "complete_challenge",
 				}
 				err = bot.handleCompleteChallenge(fakeQuery)
-			case "/test10":
-				err = bot.TestFillCompletions(10, false)
-			case "/test5random":
-				err = bot.TestFillCompletions(5, true)
 			case "/listuserids":
 				err = bot.handleListUserIDs(update.Message)
+			case "/adjuststreak":
+				err = bot.handleAdjustStreak(update.Message)
 			default:
 				// Check for commands with parameters
 				if strings.HasPrefix(update.Message.Text, "/setstreak") {
-					err = bot.handleSetStreak(update.Message)
+					// Replace with the new command to avoid breaking existing functionality
+					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Команда /setstreak устарела. Пожалуйста, используйте команду /adjuststreak для установки серии зарядок.")
+					_, err = bot.sendMessage(msg)
 				} else {
-					// Handle name response if applicable
-					if update.Message.ReplyToMessage != nil {
+					// Check if we're waiting for a custom streak input
+					var exists bool
+					err = bot.db.QueryRow(`
+						SELECT EXISTS(
+							SELECT 1 FROM bot_state 
+							WHERE user_id = ? AND chat_id = ? AND state = 'waiting_custom_streak'
+						)
+					`, update.Message.From.ID, update.Message.Chat.ID).Scan(&exists)
+
+					if err == nil && exists {
+						err = bot.handleCustomStreakInput(update.Message)
+					} else if update.Message.ReplyToMessage != nil {
+						// Handle name response if applicable
 						var exists bool
 						err = bot.db.QueryRow(`
 							SELECT EXISTS(
@@ -1188,10 +1404,32 @@ func main() {
 				"data", update.CallbackQuery.Data,
 				"from", update.CallbackQuery.From.UserName,
 			)
-			// Keep existing callback query handling for the initial join button
-			switch update.CallbackQuery.Data {
-			case "join_challenge":
+
+			// Extract the prefix from the callback data
+			callbackData := update.CallbackQuery.Data
+			var callbackPrefix string
+			if strings.Contains(callbackData, ":") {
+				callbackPrefix = strings.Split(callbackData, ":")[0]
+			} else {
+				callbackPrefix = callbackData
+			}
+
+			// Handle different callback types
+			switch {
+			case callbackData == "join_challenge":
 				err = bot.handleJoinChallenge(update.CallbackQuery)
+			case callbackData == "complete_challenge":
+				err = bot.handleCompleteChallenge(update.CallbackQuery)
+			case callbackData == "undo_complete":
+				err = bot.handleUndoComplete(update.CallbackQuery)
+			case callbackData == "update_list":
+				err = bot.handleUpdateList(update.CallbackQuery)
+			case callbackPrefix == "adjust_streak":
+				err = bot.handleAdjustStreakCallback(update.CallbackQuery)
+			case callbackPrefix == "set_streak":
+				err = bot.handleSetStreakCallback(update.CallbackQuery)
+			case callbackPrefix == "custom_streak":
+				err = bot.handleCustomStreakCallback(update.CallbackQuery)
 			}
 		}
 
