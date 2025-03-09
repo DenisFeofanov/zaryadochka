@@ -112,7 +112,7 @@ func (b *Bot) handleStart(message *tgbotapi.Message) error {
 	// ... existing keyboard and message code ...
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Хочу 💪", "join_challenge"),
+			tgbotapi.NewInlineKeyboardButtonData(ButtonLabels["join_challenge"], "join_challenge"),
 		),
 	)
 
@@ -262,16 +262,7 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	}
 
 	// Get weekday in Russian
-	weekdays := map[string]string{
-		"Monday":    "Понедельник ;)",
-		"Tuesday":   "Вторник",
-		"Wednesday": "Среда",
-		"Thursday":  "Четверг",
-		"Friday":    "Пятница",
-		"Saturday":  "Суббота",
-		"Sunday":    "Воскресенье",
-	}
-	currentWeekday := weekdays[time.Now().Weekday().String()]
+	currentWeekday := WeekdayNames[time.Now().Weekday().String()]
 
 	currentDate := time.Now().Format("02.01.2006")
 	response := fmt.Sprintf("%s, %s\n", currentWeekday, currentDate)
@@ -279,12 +270,12 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	response += "\n"
 
 	for _, p := range participants {
-		status := "⏳"
+		status := StatusIcons["pending"]
 		if p.Completed {
-			status = "✅"
+			status = StatusIcons["completed"]
 		}
 
-		response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, getDayWord(p.Streak))
+		response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, GetDayWord(p.Streak))
 	}
 
 	// Check if user completed today
@@ -318,47 +309,47 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	}
 
 	if len(fame) > 0 {
-		response += "--------------------------------------------------\n"
-		response += "Аллея славы\n\n"
+		response += Messages["hall_of_fame_separator"] + "\n"
+		response += Messages["hall_of_fame"] + "\n\n"
 
 		// Then list 100 achievers who haven't reached 365 yet
 		has100 := false
-		response += "🌟 100 дней:\n"
+		response += Messages["achievement_100"] + "\n"
 		for _, f := range fame {
 			if f.Achievement100 && !f.Achievement365 {
 				has100 = true
 				achievedDate := f.AchievedAt100.Format("02.01.2006")
-				response += fmt.Sprintf("  • %s - достиг (%s)\n", f.Name, achievedDate)
+				response += fmt.Sprintf("  • %s - %s (%s)\n", f.Name, Messages["achievement_reached"], achievedDate)
 			}
 		}
 
 		if !has100 {
-			response += "–\n"
+			response += Messages["no_achievements"] + "\n"
 		}
 
 		response += "\n"
 
 		// First list 365 achievers
 		hasLegends := false
-		response += "👑 365 дней:\n"
+		response += Messages["achievement_365"] + "\n"
 		for _, f := range fame {
 			if f.Achievement365 {
 				hasLegends = true
 				achievedDate := f.AchievedAt365.Format("02.01.2006")
-				response += fmt.Sprintf("  • %s - достиг (%s)\n", f.Name, achievedDate)
+				response += fmt.Sprintf("  • %s - %s (%s)\n", f.Name, Messages["achievement_reached"], achievedDate)
 			}
 		}
 
 		if !hasLegends {
-			response += "–"
+			response += Messages["no_achievements"]
 		}
 	}
 
 	// Create a reply keyboard with options
 	replyKeyboard := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("Обновить"),
-			tgbotapi.NewKeyboardButton("Сделать зарядочку"),
+			tgbotapi.NewKeyboardButton(ButtonLabels["update"]),
+			tgbotapi.NewKeyboardButton(ButtonLabels["do_exercise"]),
 		),
 	)
 	replyKeyboard.ResizeKeyboard = true // Make keyboard smaller
@@ -505,11 +496,11 @@ func (b *Bot) sendDailyReminders() error {
 
 		response := Messages["reminder"] + "\n\nУчастники:\n\n"
 		for _, p := range participants {
-			status := "⏳"
+			status := StatusIcons["pending"]
 			if p.Completed {
-				status = "✅"
+				status = StatusIcons["completed"]
 			}
-			response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, getDayWord(p.Streak))
+			response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, GetDayWord(p.Streak))
 		}
 
 		msg := tgbotapi.NewMessage(chatID, response)
@@ -598,20 +589,6 @@ func (b *Bot) getConsecutiveCompletionDays() (int, error) {
 	}
 
 	return consecutiveDays, nil
-}
-
-// Helper function to get the correct form of "день/дня/дней"
-func getDayWord(days int) string {
-	if days == 0 {
-		return "дней"
-	}
-	if days%10 == 1 && days%100 != 11 {
-		return "день"
-	}
-	if days%10 >= 2 && days%10 <= 4 && (days%100 < 10 || days%100 >= 20) {
-		return "дня"
-	}
-	return "дней"
 }
 
 // TestFillCompletions fills in completion records for the specified number of days
@@ -738,13 +715,13 @@ func (b *Bot) sendLastChanceReminders() error {
 			continue
 		}
 
-		response := "Последний шанс!\n\nУчастники:\n\n"
+		response := Messages["last_chance"] + "\n\nУчастники:\n\n"
 		for _, p := range participants {
-			status := "⏳"
+			status := StatusIcons["pending"]
 			if p.Completed {
-				status = "✅"
+				status = StatusIcons["completed"]
 			}
-			response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, getDayWord(p.Streak))
+			response += fmt.Sprintf("- %s %s (%d %s)\n\n", status, p.Name, p.Streak, GetDayWord(p.Streak))
 		}
 
 		msg := tgbotapi.NewMessage(chatID, response)
@@ -849,7 +826,7 @@ func (b *Bot) checkAndRecordAchievements(userID int64, streak int) error {
 				return err
 			}
 
-			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🏆 Поздравляем, %s! Вы достигли 100 дней подряд и были занесены в Аллею Славы!", name))
+			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf(Messages["achievement_100_congrats"]))
 			_, err = b.sendMessage(msg)
 			if err != nil {
 				return err
@@ -893,7 +870,7 @@ func (b *Bot) checkAndRecordAchievements(userID int64, streak int) error {
 				return err
 			}
 
-			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🏆🏆🏆 Величайшее достижение! %s, вы занимались 365 дней подряд и теперь навечно в Аллее Славы!", name))
+			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf(Messages["achievement_365_congrats"]))
 			_, err = b.sendMessage(msg)
 			if err != nil {
 				return err
@@ -1023,7 +1000,7 @@ func (b *Bot) handleSetStreak(message *tgbotapi.Message) error {
 	}
 
 	// Send success message
-	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Серия для %s установлена на %d %s", name, streakDays, getDayWord(streakDays)))
+	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Серия для %s установлена на %d %s", name, streakDays, GetDayWord(streakDays)))
 	_, err = b.sendMessage(msg)
 	if err != nil {
 		return err
