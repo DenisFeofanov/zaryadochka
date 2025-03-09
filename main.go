@@ -301,14 +301,14 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 
 	// hidden for now
 	// Add streak information to the response
-	// streak, err := b.getConsecutiveCompletionDays()
-	// if err != nil {
-	// 	return err
-	// }
+	streak, err := b.getConsecutiveCompletionDays()
+	if err != nil {
+		return err
+	}
 
-	// response += fmt.Sprintf("\n🔥 Совместных дней подряд: %d\n",
-	// 	streak,
-	// )
+	response += fmt.Sprintf("\n🔥 Совместных дней подряд: %d\n",
+		streak,
+	)
 
 	// Add Walk of Fame
 	fame, err := b.getWalkOfFame()
