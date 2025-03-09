@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,6 +71,13 @@ func initDB() (*sql.DB, error) {
 			completed_at DATE,
 			congrats_message TEXT,
 			PRIMARY KEY (user_id, completed_at),
+			FOREIGN KEY (user_id) REFERENCES participants(user_id)
+		);
+		CREATE TABLE IF NOT EXISTS achievements (
+			user_id INTEGER,
+			achievement_type TEXT,
+			achieved_at DATE,
+			PRIMARY KEY (user_id, achievement_type),
 			FOREIGN KEY (user_id) REFERENCES participants(user_id)
 		);
 	`)
@@ -267,7 +276,7 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	currentDate := time.Now().Format("02.01.2006")
 	response := fmt.Sprintf("%s, %s\n", currentWeekday, currentDate)
 
-	response += "Участники:\n\n"
+	response += "\n"
 
 	for _, p := range participants {
 		status := "⏳"
@@ -291,15 +300,59 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 		return err
 	}
 
+	// hidden for now
 	// Add streak information to the response
-	streak, err := b.getConsecutiveCompletionDays()
+	// streak, err := b.getConsecutiveCompletionDays()
+	// if err != nil {
+	// 	return err
+	// }
+
+	// response += fmt.Sprintf("\n🔥 Совместных дней подряд: %d\n",
+	// 	streak,
+	// )
+
+	// Add Walk of Fame
+	fame, err := b.getWalkOfFame()
 	if err != nil {
 		return err
 	}
 
-	response += fmt.Sprintf("\n🔥 Дней подряд: %d\n",
-		streak,
-	)
+	if len(fame) > 0 {
+		response += "--------------------------------------------------\n"
+		response += "Аллея славы\n\n"
+
+		// Then list 100 achievers who haven't reached 365 yet
+		has100 := false
+		response += "🌟 100 дней:\n"
+		for _, f := range fame {
+			if f.Achievement100 && !f.Achievement365 {
+				has100 = true
+				achievedDate := f.AchievedAt100.Format("02.01.2006")
+				response += fmt.Sprintf("  • %s - достиг (%s)\n", f.Name, achievedDate)
+			}
+		}
+
+		if !has100 {
+			response += "–\n"
+		}
+
+		response += "\n"
+
+		// First list 365 achievers
+		hasLegends := false
+		response += "👑 365 дней:\n"
+		for _, f := range fame {
+			if f.Achievement365 {
+				hasLegends = true
+				achievedDate := f.AchievedAt365.Format("02.01.2006")
+				response += fmt.Sprintf("  • %s - достиг (%s)\n", f.Name, achievedDate)
+			}
+		}
+
+		if !hasLegends {
+			response += "–"
+		}
+	}
 
 	// Create a reply keyboard with options
 	replyKeyboard := tgbotapi.NewReplyKeyboard(
@@ -357,6 +410,17 @@ func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
 		VALUES (?, ?, ?)
 	`, query.From.ID, today, congratsMessage)
 	if err != nil {
+		return err
+	}
+
+	// Get current streak to check for achievements
+	streak, err := b.getIndividualStreak(query.From.ID)
+	if err != nil {
+		return err
+	}
+
+	// Check and record achievements if applicable
+	if err := b.checkAndRecordAchievements(query.From.ID, streak); err != nil {
 		return err
 	}
 
@@ -593,6 +657,57 @@ func (b *Bot) TestFillCompletions(days int, notEveryoneCompletes bool) error {
 	return nil
 }
 
+// SetUserStreak sets a specific streak for a user by filling in completion records
+// for consecutive days leading up to today
+func (b *Bot) SetUserStreak(userID int64, streakDays int) error {
+	// First, check if the user exists
+	var exists bool
+	err := b.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM participants 
+			WHERE user_id = ?
+		)
+	`, userID).Scan(&exists)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		return fmt.Errorf("user with ID %d does not exist", userID)
+	}
+
+	// Clear existing streak data first to avoid conflicts
+	_, err = b.db.Exec(`
+		DELETE FROM daily_completions 
+		WHERE user_id = ? AND completed_at >= date('now', ?) AND completed_at <= date('now')
+	`, userID, fmt.Sprintf("-%d days", streakDays))
+	if err != nil {
+		return err
+	}
+
+	// Fill completions for each day in the streak
+	for i := streakDays - 1; i >= 0; i-- {
+		date := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
+		congratsMessage := getRandomCongratsMessage()
+
+		_, err = b.db.Exec(`
+			INSERT INTO daily_completions (user_id, completed_at, congrats_message)
+			VALUES (?, ?, ?)
+		`, userID, date, congratsMessage)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Check for achievements after setting the streak
+	streak, err := b.getIndividualStreak(userID)
+	if err != nil {
+		return err
+	}
+
+	return b.checkAndRecordAchievements(userID, streak)
+}
+
 func (b *Bot) sendLastChanceReminders() error {
 	today := time.Now().Format("2006-01-02")
 
@@ -692,6 +807,263 @@ func (b *Bot) sendMessage(msg tgbotapi.MessageConfig) (tgbotapi.Message, error) 
 		"message_id", sent.MessageID,
 	)
 	return sent, nil
+}
+
+// checkAndRecordAchievements checks if a user has reached any milestone streaks
+// and records the achievement if they have.
+func (b *Bot) checkAndRecordAchievements(userID int64, streak int) error {
+	// Check for milestone achievements
+	if streak >= 100 {
+		// Check if user already has the 100+ days achievement
+		var exists bool
+		err := b.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM achievements 
+				WHERE user_id = ? AND achievement_type = '100_days'
+			)
+		`, userID).Scan(&exists)
+		if err != nil {
+			return err
+		}
+
+		// Record the achievement if not yet achieved
+		if !exists {
+			_, err = b.db.Exec(`
+				INSERT INTO achievements (user_id, achievement_type, achieved_at)
+				VALUES (?, '100_days', date('now'))
+			`, userID)
+			if err != nil {
+				return err
+			}
+
+			// Send congratulatory message
+			var chatID int64
+			err = b.db.QueryRow(`SELECT chat_id FROM participants WHERE user_id = ?`, userID).Scan(&chatID)
+			if err != nil {
+				return err
+			}
+
+			var name string
+			err = b.db.QueryRow(`SELECT COALESCE(display_name, username) FROM participants WHERE user_id = ?`, userID).Scan(&name)
+			if err != nil {
+				return err
+			}
+
+			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🏆 Поздравляем, %s! Вы достигли 100 дней подряд и были занесены в Аллею Славы!", name))
+			_, err = b.sendMessage(msg)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if streak >= 365 {
+		// Check if user already has the 365+ days achievement
+		var exists bool
+		err := b.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM achievements 
+				WHERE user_id = ? AND achievement_type = '365_days'
+			)
+		`, userID).Scan(&exists)
+		if err != nil {
+			return err
+		}
+
+		// Record the achievement if not yet achieved
+		if !exists {
+			_, err = b.db.Exec(`
+				INSERT INTO achievements (user_id, achievement_type, achieved_at)
+				VALUES (?, '365_days', date('now'))
+			`, userID)
+			if err != nil {
+				return err
+			}
+
+			// Send congratulatory message
+			var chatID int64
+			err = b.db.QueryRow(`SELECT chat_id FROM participants WHERE user_id = ?`, userID).Scan(&chatID)
+			if err != nil {
+				return err
+			}
+
+			var name string
+			err = b.db.QueryRow(`SELECT COALESCE(display_name, username) FROM participants WHERE user_id = ?`, userID).Scan(&name)
+			if err != nil {
+				return err
+			}
+
+			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🏆🏆🏆 Величайшее достижение! %s, вы занимались 365 дней подряд и теперь навечно в Аллее Славы!", name))
+			_, err = b.sendMessage(msg)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// getWalkOfFame returns all participants who have achieved milestone streaks
+func (b *Bot) getWalkOfFame() ([]struct {
+	Name           string
+	Achievement100 bool
+	Achievement365 bool
+	AchievedAt100  time.Time
+	AchievedAt365  time.Time
+}, error) {
+	rows, err := b.db.Query(`
+		SELECT 
+			COALESCE(p.display_name, p.username) as name,
+			a100.user_id IS NOT NULL as achievement_100,
+			a365.user_id IS NOT NULL as achievement_365,
+			a100.achieved_at as achieved_at_100,
+			a365.achieved_at as achieved_at_365
+		FROM participants p
+		LEFT JOIN achievements a100 
+			ON p.user_id = a100.user_id 
+			AND a100.achievement_type = '100_days'
+		LEFT JOIN achievements a365 
+			ON p.user_id = a365.user_id 
+			AND a365.achievement_type = '365_days'
+		WHERE a100.user_id IS NOT NULL OR a365.user_id IS NOT NULL
+		ORDER BY 
+			a365.user_id IS NULL, 
+			a365.achieved_at DESC,
+			a100.achieved_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var fame []struct {
+		Name           string
+		Achievement100 bool
+		Achievement365 bool
+		AchievedAt100  time.Time
+		AchievedAt365  time.Time
+	}
+
+	for rows.Next() {
+		var f struct {
+			Name           string
+			Achievement100 bool
+			Achievement365 bool
+			AchievedAt100  time.Time
+			AchievedAt365  time.Time
+		}
+		var achieved100, achieved365 sql.NullTime
+		if err := rows.Scan(&f.Name, &f.Achievement100, &f.Achievement365, &achieved100, &achieved365); err != nil {
+			return nil, err
+		}
+
+		if achieved100.Valid {
+			f.AchievedAt100 = achieved100.Time
+		}
+		if achieved365.Valid {
+			f.AchievedAt365 = achieved365.Time
+		}
+
+		fame = append(fame, f)
+	}
+
+	return fame, nil
+}
+
+// handleSetStreak processes the /setstreak command with parameters: userId streakDays
+func (b *Bot) handleSetStreak(message *tgbotapi.Message) error {
+	// Parse the command text to extract userId and streakDays
+	var userID int64
+	var streakDays int
+
+	// The command format should be: /setstreak userId streakDays
+	// Split the command text by spaces
+	parts := strings.Fields(message.Text)
+
+	// Check if the command has the correct number of parameters
+	if len(parts) != 3 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Неправильный формат команды. Используйте: /setstreak userId количествоДней")
+		_, err := b.sendMessage(msg)
+		return err
+	}
+
+	// Parse userId
+	parsedUserID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Некорректный ID пользователя. Должно быть целое число.")
+		_, err := b.sendMessage(msg)
+		return err
+	}
+	userID = parsedUserID
+
+	// Parse streakDays
+	parsedDays, err := strconv.Atoi(parts[2])
+	if err != nil || parsedDays < 0 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Некорректное количество дней. Должно быть положительное целое число.")
+		_, err := b.sendMessage(msg)
+		return err
+	}
+	streakDays = parsedDays
+
+	// Set the streak
+	err = b.SetUserStreak(userID, streakDays)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Ошибка при установке серии: %s", err.Error()))
+		_, err := b.sendMessage(msg)
+		return err
+	}
+
+	// Get the user's name
+	var name string
+	err = b.db.QueryRow(`SELECT COALESCE(display_name, username) FROM participants WHERE user_id = ?`, userID).Scan(&name)
+	if err != nil {
+		// If there's an error, just use the userID as a fallback
+		name = fmt.Sprintf("пользователя (ID: %d)", userID)
+	}
+
+	// Send success message
+	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Серия для %s установлена на %d %s", name, streakDays, getDayWord(streakDays)))
+	_, err = b.sendMessage(msg)
+	if err != nil {
+		return err
+	}
+
+	// Show updated list
+	return b.sendParticipantsList(message.Chat.ID, message.From.ID)
+}
+
+// handleListUserIDs lists all participants with their IDs
+func (b *Bot) handleListUserIDs(message *tgbotapi.Message) error {
+	rows, err := b.db.Query(`
+		SELECT 
+			user_id, 
+			COALESCE(display_name, username) as name
+		FROM participants
+		ORDER BY joined_at
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	response := "📋 Список участников и их ID:\n\n"
+
+	for rows.Next() {
+		var userID int64
+		var name string
+		if err := rows.Scan(&userID, &name); err != nil {
+			return err
+		}
+
+		response += fmt.Sprintf("👤 %s - ID: %d\n", name, userID)
+	}
+
+	response += "\nДля установки серии используйте команду:\n/setstreak ID количествоДней"
+
+	msg := tgbotapi.NewMessage(message.Chat.ID, response)
+	_, err = b.sendMessage(msg)
+	return err
 }
 
 func main() {
@@ -811,19 +1183,26 @@ func main() {
 				err = bot.TestFillCompletions(10, false)
 			case "/test5random":
 				err = bot.TestFillCompletions(5, true)
+			case "/listuserids":
+				err = bot.handleListUserIDs(update.Message)
 			default:
-				// Handle name response if applicable
-				if update.Message.ReplyToMessage != nil {
-					var exists bool
-					err = bot.db.QueryRow(`
-						SELECT EXISTS(
-							SELECT 1 FROM pending_joins 
-							WHERE user_id = ? AND chat_id = ?
-						)
-					`, update.Message.From.ID, update.Message.Chat.ID).Scan(&exists)
+				// Check for commands with parameters
+				if strings.HasPrefix(update.Message.Text, "/setstreak") {
+					err = bot.handleSetStreak(update.Message)
+				} else {
+					// Handle name response if applicable
+					if update.Message.ReplyToMessage != nil {
+						var exists bool
+						err = bot.db.QueryRow(`
+							SELECT EXISTS(
+								SELECT 1 FROM pending_joins 
+								WHERE user_id = ? AND chat_id = ?
+							)
+						`, update.Message.From.ID, update.Message.Chat.ID).Scan(&exists)
 
-					if err == nil && exists {
-						err = bot.handleNameResponse(update.Message)
+						if err == nil && exists {
+							err = bot.handleNameResponse(update.Message)
+						}
 					}
 				}
 			}
