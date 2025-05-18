@@ -357,6 +357,9 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	replyKeyboard := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton(ButtonLabels["update"]),
+			tgbotapi.NewKeyboardButton(ButtonLabels["mark_yesterday"]),
+		),
+		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton(ButtonLabels["do_exercise"]),
 		),
 	)
@@ -432,6 +435,68 @@ func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
 
 	// Show updated list
 	return b.sendParticipantsList(query.Message.Chat.ID, query.From.ID)
+}
+
+func (b *Bot) handleMarkYesterday(message *tgbotapi.Message) error {
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	userID := message.From.ID
+	chatID := message.Chat.ID
+
+	// Check if already completed yesterday
+	var completed bool
+	err := b.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM daily_completions 
+			WHERE user_id = ? AND completed_at = ?
+		)
+	`, userID, yesterday).Scan(&completed)
+	if err != nil {
+		b.logger.Error("db error checking yesterday's completion", "error", err, "user_id", userID)
+		errMsg := tgbotapi.NewMessage(chatID, Messages["error_try_later"])
+		b.sendMessage(errMsg)
+		return err
+	}
+
+	if completed {
+		msg := tgbotapi.NewMessage(chatID, Messages["already_completed_yesterday"])
+		_, errSend := b.sendMessage(msg)
+		if errSend != nil {
+			b.logger.Error("failed to send 'already_completed_yesterday' message", "error", errSend, "user_id", userID)
+		}
+		return nil
+	}
+
+	congratsMessage := getRandomCongratsMessage()
+
+	// Mark yesterday as completed
+	_, err = b.db.Exec(`
+		INSERT INTO daily_completions (user_id, completed_at, congrats_message)
+		VALUES (?, ?, ?)
+	`, userID, yesterday, congratsMessage)
+	if err != nil {
+		b.logger.Error("db error inserting yesterday's completion", "error", err, "user_id", userID)
+		errMsg := tgbotapi.NewMessage(chatID, Messages["error_marking_yesterday"])
+		b.sendMessage(errMsg)
+		return err
+	}
+
+	// Get current streak to check for achievements
+	streak, err := b.getIndividualStreak(userID)
+	if err != nil {
+		b.logger.Error("failed to get individual streak after marking yesterday", "error", err, "user_id", userID)
+	} else {
+		if errAch := b.checkAndRecordAchievements(userID, streak); errAch != nil {
+			b.logger.Error("failed to check/record achievements after marking yesterday", "error", errAch, "user_id", userID)
+		}
+	}
+
+	successMsg := tgbotapi.NewMessage(chatID, Messages["yesterday_marked_success"])
+	_, errSend := b.sendMessage(successMsg)
+	if errSend != nil {
+		b.logger.Error("failed to send 'yesterday_marked_success' message", "error", errSend, "user_id", userID)
+	}
+
+	return b.sendParticipantsList(chatID, userID)
 }
 
 func (b *Bot) handleUndoComplete(query *tgbotapi.CallbackQuery) error {
@@ -1361,6 +1426,8 @@ func main() {
 					Data:    "complete_challenge",
 				}
 				err = bot.handleCompleteChallenge(fakeQuery)
+			case "Отметить за вчера":
+				err = bot.handleMarkYesterday(update.Message)
 			case "/listuserids":
 				err = bot.handleListUserIDs(update.Message)
 			case "/adjuststreak":
