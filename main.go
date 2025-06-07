@@ -356,10 +356,7 @@ func (b *Bot) sendParticipantsList(chatID int64, userID int64) error {
 	// Create a reply keyboard with options
 	replyKeyboard := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton(ButtonLabels["update"]),
 			tgbotapi.NewKeyboardButton(ButtonLabels["mark_yesterday"]),
-		),
-		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton(ButtonLabels["do_exercise"]),
 		),
 	)
@@ -401,7 +398,12 @@ func (b *Bot) handleCompleteChallenge(query *tgbotapi.CallbackQuery) error {
 		// For reply keyboard, send a message instead of callback
 		msg := tgbotapi.NewMessage(query.Message.Chat.ID, Messages["already_completed"])
 		_, err := b.api.Send(msg)
-		return err
+		if err != nil {
+			return err
+		}
+
+		// Show current stats
+		return b.sendParticipantsList(query.Message.Chat.ID, query.From.ID)
 	}
 
 	congratsMessage := getRandomCongratsMessage()
@@ -463,7 +465,9 @@ func (b *Bot) handleMarkYesterday(message *tgbotapi.Message) error {
 		if errSend != nil {
 			b.logger.Error("failed to send 'already_completed_yesterday' message", "error", errSend, "user_id", userID)
 		}
-		return nil
+
+		// Show current stats
+		return b.sendParticipantsList(chatID, userID)
 	}
 
 	congratsMessage := getRandomCongratsMessage()
@@ -1416,6 +1420,8 @@ func main() {
 			switch update.Message.Text {
 			case "/start":
 				err = bot.handleStart(update.Message)
+			case "/refresh":
+				err = bot.sendParticipantsList(update.Message.Chat.ID, update.Message.From.ID)
 			case "Обновить":
 				err = bot.sendParticipantsList(update.Message.Chat.ID, update.Message.From.ID)
 			case "Сделать зарядочку":
