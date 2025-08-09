@@ -20,6 +20,8 @@ var Messages = map[string]string{
 	"already_completed_yesterday": "Отметка за вчера уже стоит.",
 	"error_marking_yesterday":     "Произошла ошибка при отметке вчерашнего дня.",
 	"yesterday_marked_success":    "Вчерашний день успешно отмечен!",
+	"backfill_done":               "Готово. Проставил пропущенные дни до сегодняшнего дня. Вставлено отметок: %d",
+	"backfill_none":               "Пропущенных дней не обнаружено. Все в порядке ✨",
 }
 
 var CongratsMessages = []string{

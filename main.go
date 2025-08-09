@@ -231,6 +231,9 @@ func (b *Bot) handleJoinChallenge(query *tgbotapi.CallbackQuery) error {
 	msg := tgbotapi.NewMessage(query.Message.Chat.ID, Messages["enter_name"])
 	msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 	_, err := b.sendMessage(msg)
+	if err != nil {
+		return err
+	}
 
 	// Store temporary state in DB to handle the name response
 	_, err = b.db.Exec(`
@@ -501,6 +504,121 @@ func (b *Bot) handleMarkYesterday(message *tgbotapi.Message) error {
 	}
 
 	return b.sendParticipantsList(chatID, userID)
+}
+
+// handleBackfillToToday inserts missing completion days for every participant up to today.
+// It preserves existing marks and only fills gaps between the participant's last completion
+// date and today. Uses a fixed congrats message for backfilled days to avoid noisy random texts.
+func (b *Bot) handleBackfillToToday(message *tgbotapi.Message) error {
+	today := time.Now().Format("2006-01-02")
+
+	// Collect participants
+	rows, err := b.db.Query(`SELECT user_id FROM participants`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var participantIDs []int64
+	for rows.Next() {
+		var userID int64
+		if err := rows.Scan(&userID); err != nil {
+			return err
+		}
+		participantIDs = append(participantIDs, userID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if len(participantIDs) == 0 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf(Messages["backfill_none"]))
+		_, _ = b.sendMessage(msg)
+		return nil
+	}
+
+	// Backfill per participant
+	totalInserted := 0
+	fixedCongrats := "Бэкаповая отметка ✅"
+
+	for _, userID := range participantIDs {
+		var lastDate sql.NullString
+		// Find the most recent completion date for the user
+		err := b.db.QueryRow(`
+            SELECT MAX(completed_at) FROM daily_completions WHERE user_id = ?
+        `, userID).Scan(&lastDate)
+		if err != nil {
+			return err
+		}
+
+		// Determine start date: if no completions, use the day before today so we only fill today
+		var start time.Time
+		if lastDate.Valid && lastDate.String != "" {
+			parsed, parseErr := time.Parse("2006-01-02", lastDate.String)
+			if parseErr != nil {
+				return parseErr
+			}
+			// Start from the day after the last completion
+			start = parsed.AddDate(0, 0, 1)
+		} else {
+			// If user never had a completion, we choose to only fill today
+			start = time.Now()
+		}
+
+		end, _ := time.Parse("2006-01-02", today)
+
+		// If start is after today, nothing to do
+		if start.After(end) {
+			continue
+		}
+
+		// Iterate from start to today, inserting missing days if not present
+		for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+			dateStr := d.Format("2006-01-02")
+
+			var exists bool
+			err := b.db.QueryRow(`
+                SELECT EXISTS(
+                    SELECT 1 FROM daily_completions WHERE user_id = ? AND completed_at = ?
+                )
+            `, userID, dateStr).Scan(&exists)
+			if err != nil {
+				return err
+			}
+
+			if exists {
+				continue
+			}
+
+			_, err = b.db.Exec(`
+                INSERT INTO daily_completions (user_id, completed_at, congrats_message)
+                VALUES (?, ?, ?)
+            `, userID, dateStr, fixedCongrats)
+			if err != nil {
+				return err
+			}
+			totalInserted++
+		}
+	}
+
+	if totalInserted == 0 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf(Messages["backfill_none"]))
+		_, _ = b.sendMessage(msg)
+		return nil
+	}
+
+	// After backfilling, re-calc achievements in case thresholds were crossed
+	for _, userID := range participantIDs {
+		streak, err := b.getIndividualStreak(userID)
+		if err == nil {
+			_ = b.checkAndRecordAchievements(userID, streak)
+		}
+	}
+
+	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf(Messages["backfill_done"], totalInserted))
+	_, _ = b.sendMessage(msg)
+	return nil
 }
 
 func (b *Bot) handleUndoComplete(query *tgbotapi.CallbackQuery) error {
@@ -1438,6 +1556,8 @@ func main() {
 				err = bot.handleListUserIDs(update.Message)
 			case "/adjuststreak":
 				err = bot.handleAdjustStreak(update.Message)
+			case "/backfill":
+				err = bot.handleBackfillToToday(update.Message)
 			default:
 				// Check for commands with parameters
 				if strings.HasPrefix(update.Message.Text, "/setstreak") {
